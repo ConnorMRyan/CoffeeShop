@@ -1,0 +1,18 @@
+# Run configuration for CoffeeShop experiments
+
+run:
+  experiment_name: coffee_baseline
+  total_steps: 100000
+  rollout_length: 128
+  eval_interval: 5000
+  save_interval: 10000
+  log_interval: 1000
+
+# Device selection (example for torch; leave as 'auto' to infer)
+device: auto
+
+# Tracking
+tracking:
+  use_wandb: false
+  project: CoffeeShop
+  entity: your-wandb-entity

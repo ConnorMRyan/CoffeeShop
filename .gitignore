@@ -1,0 +1,46 @@
+# Byte-compiled / caches
+__pycache__/
+*.py[cod]
+*.so
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+.python-version
+
+# Build / dist / metadata
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# IDE / editors
+.idea/
+.vscode/
+*.code-workspace
+
+# Testing & coverage
+.pytest_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Logs / runs / checkpoints
+logs/
+runs/
+checkpoints/
+wandb/
+
+# Data & outputs (optional – remove if you want these tracked)
+outputs/
+data/
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Notebooks
+.ipynb_checkpoints/

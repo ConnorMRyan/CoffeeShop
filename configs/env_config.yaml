@@ -1,0 +1,11 @@
+# Environment configuration for CoffeeShop
+# Select which environment wrapper to use and its parameters.
+
+env:
+  # one of: overcooked, crafter, nethack, aisaac
+  name: overcooked
+  params:
+    layout_name: cramped_room
+
+# Seed control
+seed: 42
