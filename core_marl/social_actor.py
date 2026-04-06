@@ -6,7 +6,7 @@ from typing import Any, Dict
 
 @dataclass
 class SocialActorConfig:
-    """Configuration for a SocialActor."""
+    """Configuration for a PPOActor."""
     id: str
 
 

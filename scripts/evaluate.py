@@ -4,20 +4,19 @@ import argparse
 from typing import Any, Dict
 
 from utils import get_logger
-from core_marl import Mediator
 from envs import SocialEnvWrapper
 
 
 def make_env(name: str, params: Dict[str, Any]) -> SocialEnvWrapper:
     name = name.lower()
     if name == "overcooked":
-        from envs.overcooked.wrapper import OvercookedWrapper
-        return OvercookedWrapper(**params)
+        from envs.overcooked.wrapper import OvercookedSocialWrapper
+        return OvercookedSocialWrapper(**params)
     if name == "crafter":
-        from envs.crafter.wrapper import CrafterWrapper
+        from envs.crafter.wrapper import CrafterWrapper  # may be unavailable
         return CrafterWrapper(**params)
     if name == "nethack":
-        from envs.nethack.wrapper import NetHackWrapper
+        from envs.nethack.wrapper import NetHackWrapper  # may be unavailable
         return NetHackWrapper(**params)
     if name == "aisaac":
         from envs.aisaac.wrapper import AIsaacWrapper
@@ -35,23 +34,22 @@ def main() -> None:
     log = get_logger("CoffeeShop.Eval")
 
     env = make_env(args.env, {"layout_name": args.layout} if args.env == "overcooked" else {})
-    mediator = Mediator(env)
 
     for ep in range(args.episodes):
-        obs, infos = mediator.reset()
+        obs, infos = env.reset()
         ep_return = 0.0
         steps = 0
         done = False
         while not done and steps < 1000:
             # Random/no-op placeholder policy: do nothing
-            actions = {aid: None for aid in mediator.agent_ids}
-            obs, rewards, terminated, truncated, infos = mediator.step(actions)
+            actions = {aid: "stay" for aid in env.agent_ids}
+            obs, rewards, terminated, truncated, infos = env.step(actions)
             ep_return += sum(rewards.values())
             steps += 1
             done = any(terminated.values()) or any(truncated.values())
         log.info({"episode": ep + 1, "return": ep_return, "steps": steps})
 
-    mediator.close()
+    env.close()
     log.info("Evaluation stub complete.")
 
 
