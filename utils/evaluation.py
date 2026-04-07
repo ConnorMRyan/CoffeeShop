@@ -70,51 +70,57 @@ class ActorFromCheckpoint:
 
 def run_episode(
         env: SocialEnvWrapper,
-        policy_left: Any,
-        policy_right: Any,
+        actors: Dict[str, Any],
         horizon: int = 1000,
         render: bool = False
-) -> Tuple[float, float]:
+) -> Dict[str, Any]:
     """
-    Runs a single episode between two policies.
-    Returns (total_deliveries, total_score).
-    """
-    obs, _ = env.reset()
-    agent_ids = env.agent_ids
-    
-    # Generic mapping for at least 2 agents
-    if len(agent_ids) < 2:
-        raise RuntimeError(f"Env provided {len(agent_ids)} agent seats. Need at least 2 for evaluation.")
+    Runs a single evaluation episode for an N-agent environment.
 
-    a_left_id, a_right_id = agent_ids[0], agent_ids[1]
+    Args:
+        env: Instantiated SocialEnvWrapper.
+        actors: Dict mapping agent_id (e.g., "agent_0") to an actor object.
+        horizon: Maximum step limit.
+        render: Whether to call env.render().
+
+    Returns:
+        Dict containing total_team_score, agent_rewards, and custom metrics.
+    """
+    obs_dict, _ = env.reset()
+    agent_ids = env.agent_ids
+
+    agent_rewards = {aid: 0.0 for aid in agent_ids}
     total_deliveries = 0.0
-    total_score = 0.0
 
     for _ in range(horizon):
-        # We only control the first two agents in standard XP evaluation
-        actions = {
-            a_left_id: policy_left.act(obs[a_left_id]),
-            a_right_id: policy_right.act(obs[a_right_id])
-        }
-        # If there are more agents, we need to handle them (e.g., random or no-op)
-        # For evaluation scripts in this repo, we typically assume 2-agent coordination.
-        if len(agent_ids) > 2:
-            for i in range(2, len(agent_ids)):
-                actions[agent_ids[i]] = 0 # Dummy action
+        actions = {}
+        for aid in agent_ids:
+            if aid not in actors:
+                raise ValueError(f"Missing evaluation actor for env agent: {aid}")
 
-        next_obs, rewards, terminated, truncated, infos = env.step(actions)
+            # Each agent evaluates its own local observation
+            actions[aid] = actors[aid].act(obs_dict[aid])
 
+        n_obs, rewards, terminated, truncated, infos = env.step(actions)
+
+        # Track custom environment-specific metrics (e.g., Overcooked)
         if infos.get("has_delivery", False):
             total_deliveries += 1.0
 
+        # Accumulate sparse rewards dynamically for all agents
         sr = infos.get("sparse_rewards", {})
-        # Sum rewards for all agents if present
         for aid in agent_ids:
-            total_score += float(sr.get(aid, 0.0))
+            agent_rewards[aid] += float(sr.get(aid, 0.0))
 
-        obs = next_obs
-        if render: env.render()
+        obs_dict = n_obs
+        if render:
+            env.render()
+
         if any(terminated.values()) or any(truncated.values()):
             break
 
-    return total_deliveries, total_score
+    return {
+        "total_team_score": sum(agent_rewards.values()),
+        "agent_rewards": agent_rewards,
+        "total_deliveries": total_deliveries
+    }

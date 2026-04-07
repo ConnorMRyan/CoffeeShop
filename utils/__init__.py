@@ -4,7 +4,7 @@ This module intentionally provides a very small surface so scripts/train.py
 can run in environments without optional logging libraries.
 """
 from __future__ import annotations
-
+from .metrics import Metrics
 import os
 from typing import Dict, List, Optional
 
@@ -31,25 +31,6 @@ class _SimpleLogger:
 def get_logger() -> _SimpleLogger:
     return _SimpleLogger()
 
-
-# ----------------------------------------------------------------------------
-# Minimal metrics
-# ----------------------------------------------------------------------------
-class Metrics:
-    """Tracks lists of scalar metrics and computes means."""
-
-    def __init__(self) -> None:
-        self._hist: Dict[str, List[float]] = {}
-
-    def update(self, data: Dict[str, float]) -> None:
-        for k, v in data.items():
-            self._hist.setdefault(k, []).append(float(v))
-
-    def mean(self) -> Dict[str, float]:
-        return {k: (sum(vs) / len(vs) if vs else 0.0) for k, vs in self._hist.items()}
-
-    def clear(self) -> None:
-        self._hist.clear()
 
 
 # ----------------------------------------------------------------------------
