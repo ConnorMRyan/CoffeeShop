@@ -1,57 +1,94 @@
+"""
+scripts/evaluate.py  —  CoffeeShop Cross-Play Evaluation
+==========================================================
+Robust evaluation with forced Multi-Agent Crafter initialization.
+"""
+
 from __future__ import annotations
 
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import argparse
-from typing import Any, Dict
+import logging
+from typing import Any, Dict, Optional, Tuple
+
+import numpy as np
+import torch
 
 from utils import get_logger
+from utils.checkpointing import Checkpointer
+from utils.factory import make_env
+from utils.evaluation import ActorFromCheckpoint, RandomPartner, run_episode
 from envs import SocialEnvWrapper
 
+log = get_logger()
 
-def make_env(name: str, params: Dict[str, Any]) -> SocialEnvWrapper:
-    name = name.lower()
-    if name == "overcooked":
-        from envs.overcooked.wrapper import OvercookedSocialWrapper
-        return OvercookedSocialWrapper(**params)
-    if name == "crafter":
-        from envs.crafter.wrapper import CrafterWrapper  # may be unavailable
-        return CrafterWrapper(**params)
-    if name == "nethack":
-        from envs.nethack.wrapper import NetHackWrapper  # may be unavailable
-        return NetHackWrapper(**params)
-    if name == "aisaac":
-        from envs.aisaac.wrapper import AIsaacWrapper
-        return AIsaacWrapper(**params)
-    raise ValueError(f"Unknown env name: {name}")
+# ---------------------------------------------------------------------------
+# Episode & Evaluation logic
+# ---------------------------------------------------------------------------
+
+def _load_policy_pair(obs_dim: int, action_dim: int, ckpt: str) -> Tuple[ActorFromCheckpoint, ActorFromCheckpoint]:
+    left = ActorFromCheckpoint(obs_dim, action_dim, ckpt, key_hints=("env0_agent_0", "env1_agent_0"))
+    try:
+        right = ActorFromCheckpoint(obs_dim, action_dim, ckpt, key_hints=("env0_agent_1", "env1_agent_1"))
+    except KeyError:
+        log.info(f"--- Mapping same policy to Seat 1 for {os.path.basename(ckpt)} ---")
+        right = ActorFromCheckpoint(obs_dim, action_dim, ckpt, key_hints=("env1_agent_0", "env0_agent_0"))
+    return left, right
 
 
-def main() -> None:
+def _evaluate_pair(env, p_left, p_right, episodes, render) -> Tuple[float, float]:
+    results = [run_episode(env, p_left, p_right, render=render) for _ in range(episodes)]
+    return float(np.mean([r[0] for r in results])), float(np.mean([r[1] for r in results]))
+
+
+# ---------------------------------------------------------------------------
+# Main Orchestrator
+# ---------------------------------------------------------------------------
+
+def evaluate():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--env", default="overcooked")
+    parser.add_argument("--env", default="crafter")
     parser.add_argument("--layout", default="cramped_room")
     parser.add_argument("--episodes", type=int, default=5)
+    parser.add_argument("--ckpt_a", type=str, required=True)
+    parser.add_argument("--ckpt_b", type=str, required=True)
+    parser.add_argument("--render", action="store_true")
     args = parser.parse_args()
 
-    log = get_logger("CoffeeShop.Eval")
+    # Pass num_agents=2 directly into the factory call
+    env = make_env(args.env, {"num_agents": 2, "layout_name": args.layout}, render_mode=("human" if args.render else None))
+    log.info(f"Evaluation Mode: {args.env.upper()}")
+    log.info(f"Agents detected in environment: {env.agent_ids}")
 
-    env = make_env(args.env, {"layout_name": args.layout} if args.env == "overcooked" else {})
+    a_left, a_right = _load_policy_pair(env.obs_dim, env.action_dim, args.ckpt_a)
+    b_left, b_right = _load_policy_pair(env.obs_dim, env.action_dim, args.ckpt_b)
+    rand_pol = RandomPartner(env.action_dim)
 
-    for ep in range(args.episodes):
-        obs, infos = env.reset()
-        ep_return = 0.0
-        steps = 0
-        done = False
-        while not done and steps < 1000:
-            # Random/no-op placeholder policy: do nothing
-            actions = {aid: "stay" for aid in env.agent_ids}
-            obs, rewards, terminated, truncated, infos = env.step(actions)
-            ep_return += sum(rewards.values())
-            steps += 1
-            done = any(terminated.values()) or any(truncated.values())
-        log.info({"episode": ep + 1, "return": ep_return, "steps": steps})
+    log.info("Running SP/A (Self-Play Baseline)...")
+    _, sp_a = _evaluate_pair(env, a_left, a_right, args.episodes, args.render)
+
+    log.info("Running SP/B (Self-Play Mature)...")
+    _, sp_b = _evaluate_pair(env, b_left, b_right, args.episodes, args.render)
+
+    log.info("Running XP (Cross-Play Coordination)...")
+    _, xp_a0_b1 = _evaluate_pair(env, a_left, b_right, args.episodes, args.render)
+    _, xp_b0_a1 = _evaluate_pair(env, b_left, a_right, args.episodes, args.render)
+
+    log.info("Running RB (Robustness vs Random)...")
+    _, rb_b = _evaluate_pair(env, b_left, rand_pol, args.episodes, args.render)
+
+    log.info("-" * 40)
+    log.info(f"RESULTS FOR {args.env.upper()}")
+    log.info(f"SP/A Score:     {sp_a:.4f}")
+    log.info(f"SP/B Score:     {sp_b:.4f}")
+    log.info(f"XP Mean Score:  {(xp_a0_b1 + xp_b0_a1) / 2:.4f}")
+    log.info(f"RB/B vs Rand:   {rb_b:.4f}")
+    log.info("-" * 40)
 
     env.close()
-    log.info("Evaluation stub complete.")
-
 
 if __name__ == "__main__":
-    main()
+    evaluate()

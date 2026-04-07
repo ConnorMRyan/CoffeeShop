@@ -40,6 +40,15 @@ class SocialEnvWrapper(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def get_global_obs(self, obs_dict: Dict[str, Any], env_id: int = 0) -> Any:
+        """Return a global observation for the centralized critic.
+
+        In some environments, this might be a concatenation of all local
+        observations; in others, it's a dedicated global state.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     def close(self) -> None:
         """Release resources if any."""
         raise NotImplementedError

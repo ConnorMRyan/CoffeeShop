@@ -1,0 +1,11 @@
+# Mediator Config
+buffer_capacity: 10000
+gamma: 0.99
+epsilon_td: 0.05
+synergy_alpha: 0.3
+critic_lr: 3e-4
+critic_hidden: 256
+encoder: cnn
+img_c: 3
+img_h: 64
+img_w: 64

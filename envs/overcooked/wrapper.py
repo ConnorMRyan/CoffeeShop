@@ -194,8 +194,13 @@ class OvercookedSocialWrapper(SocialEnvWrapper):
         if self._render_mode == "human":
             pass
 
-    def close(self) -> None:
-        self._env.close()
+    def close(self):
+        if hasattr(self, "_env") and hasattr(self._env, "close"):
+            self._env.close()
+        else:
+            # OvercookedEnv often doesn't need a formal close,
+            # so we can just pass or log a debug message.
+            pass
 
     # ------------------------------------------------------------------
     # Internal helpers

@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Unified test script to verify all CoffeeShop environment pipelines."""
 
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import importlib
 import traceback
 
@@ -23,7 +27,11 @@ def test_environment(env_name: str, module_path: str, class_name: str, kwargs: d
     # 2. Run the pipeline tests
     try:
         print("Initializing...")
-        env = WrapperClass(**kwargs)
+        try:
+            env = WrapperClass(**kwargs)
+        except ImportError as e:
+            print(f"⚠️  Skipped: Required library not installed. ({e})")
+            return
 
         print(f"Agent IDs detected: {env.agent_ids}")
 
@@ -54,8 +62,7 @@ def test_environment(env_name: str, module_path: str, class_name: str, kwargs: d
 # Each environment has different action spaces, so we define how to generate a dummy action for them.
 
 def overcooked_actions(agent_ids):
-    from overcooked_ai_py.mdp.actions import Action
-    return {aid: Action.INTERACT for aid in agent_ids}
+    return {aid: 0 for aid in agent_ids}
 
 def discrete_actions(agent_ids):
     # Standard fallback for Crafter/NLE (just passing 0 or 'no-op')

@@ -38,6 +38,7 @@ Bug fixes over previous version
 
 from __future__ import annotations
 
+import heapq
 import time
 from collections import deque, defaultdict
 from dataclasses import dataclass, field
@@ -46,58 +47,97 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
+from core_marl.memory import Transition, ScoredMemory, PrioritizedBuffer
 
 
 # ---------------------------------------------------------------------------
 # Data Structures
 # ---------------------------------------------------------------------------
 
-@dataclass
-class Transition:
-    """One environment step, as pushed by a PPOActor."""
-    agent_id:        str
-    env_id:          int                   # which vectorized env this came from
-    obs:             torch.Tensor          # local observation
-    global_obs:      torch.Tensor          # full env state at s  (for centralized critic)
-    next_global_obs: torch.Tensor          # full env state at s' (required for correct TD)
-    action:          torch.Tensor
-    log_prob:        torch.Tensor          # π_old(a|s)
-    reward:          float
-    sparse_reward:   float                 # isolated sparse signal (e.g. dish served)
-    value_est:       float                 # actor's own V(s) estimate at collection time
-    done:            bool
-    timestamp:       float = field(default_factory=time.monotonic)
-
-
-@dataclass
-class ScoredMemory:
-    """A Transition annotated with Mediator-computed priority."""
-    transition:   Transition
-    td_error:     float
-    social_bonus: float                    # extra reward credited from peer synergy
-    priority:     float                    # composite score used for broadcasting
 
 
 # ---------------------------------------------------------------------------
 # Centralized Value Network
 # ---------------------------------------------------------------------------
 
-class CentralizedCritic(nn.Module):
-    """Lightweight V(s_global) estimator for TD-error calculations."""
-
-    def __init__(self, global_obs_dim: int, hidden: int = 256):
+class _Reshape(nn.Module):
+    """Inline reshape: (batch, C*H*W) → (batch, C, H, W)."""
+    def __init__(self, C: int, H: int, W: int):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(global_obs_dim, hidden),
-            nn.LayerNorm(hidden),
-            nn.ReLU(),
-            nn.Linear(hidden, hidden),
-            nn.ReLU(),
-            nn.Linear(hidden, 1),
+        self.C, self.H, self.W = C, H, W
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.view(-1, self.C, self.H, self.W)
+
+
+class CentralizedCritic(nn.Module):
+    """
+    V(s_global) estimator for TD-error calculations.
+
+    Mirrors ActorCriticNet's encoder selection so that image-based
+    environments (e.g. Crafter) are handled with a CNN rather than a
+    flat linear layer over raw pixels.
+
+    encoder="mlp"  — Linear(global_obs_dim → hidden) stack (default).
+    encoder="cnn"  — Nature-DQN conv stack; img_shape=(C,H,W) required.
+                     For single-agent envs global_obs = local obs, so
+                     img_shape matches the per-agent image shape.
+    """
+
+    def __init__(
+            self,
+            global_obs_dim: int,
+            hidden:         int              = 256,
+            encoder:        str              = "mlp",
+            img_shape:      Optional[Tuple[int, int, int]] = None,
+    ):
+        super().__init__()
+
+        if encoder == "cnn":
+            if img_shape is None:
+                raise ValueError("img_shape=(C,H,W) is required when encoder='cnn'")
+            C, H, W = img_shape
+            cnn_out = self._cnn_output_dim(C, H, W)
+            self.net = nn.Sequential(
+                _Reshape(C, H, W),
+                nn.Conv2d(C, 32, kernel_size=8, stride=4), nn.ReLU(),
+                nn.Conv2d(32, 64, kernel_size=4, stride=2), nn.ReLU(),
+                nn.Conv2d(64, 64, kernel_size=3, stride=1), nn.ReLU(),
+                nn.Flatten(),
+                nn.Linear(cnn_out, hidden),
+                nn.LayerNorm(hidden),
+                nn.ReLU(),
+                nn.Linear(hidden, hidden),
+                nn.ReLU(),
+                nn.Linear(hidden, 1),
+            )
+        else:
+            self.net = nn.Sequential(
+                nn.Linear(global_obs_dim, hidden),
+                nn.LayerNorm(hidden),
+                nn.ReLU(),
+                nn.Linear(hidden, hidden),
+                nn.ReLU(),
+                nn.Linear(hidden, 1),
+            )
+
+    @staticmethod
+    def _cnn_output_dim(C: int, H: int, W: int) -> int:
+        dummy = torch.zeros(1, C, H, W)
+        conv  = nn.Sequential(
+            nn.Conv2d(C, 32, kernel_size=8, stride=4),
+            nn.Conv2d(32, 64, kernel_size=4, stride=2),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1),
+            nn.Flatten(),
         )
+        with torch.no_grad():
+            return int(conv(dummy).shape[-1])
 
     def forward(self, global_obs: torch.Tensor) -> torch.Tensor:
-        return self.net(global_obs).squeeze(-1)
+        # global_obs: [B, D_global] or [B, C, H, W]
+        return self.net(global_obs).squeeze(-1)   # [B]
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +153,9 @@ class CoffeeShopMediator:
             epsilon_td:      float = 0.05,
             synergy_alpha:   float = 0.3,
             critic_lr:       float = 3e-4,
+            critic_hidden:   int   = 256,
+            encoder:         str   = "mlp",
+            img_shape:       Optional[Tuple[int, int, int]] = None,
             device:          str   = "cpu",
     ):
         self.gamma         = gamma
@@ -121,11 +164,16 @@ class CoffeeShopMediator:
         self.device        = torch.device(device)
 
         # ── Centralized critic & optimizer ────────────────────────────────
-        self.critic     = CentralizedCritic(global_obs_dim).to(self.device)
+        self.critic     = CentralizedCritic(
+                              global_obs_dim,
+                              hidden    = critic_hidden,
+                              encoder   = encoder,
+                              img_shape = img_shape,
+                          ).to(self.device)
         self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=critic_lr)
 
         # ── Shared prioritized buffer ─────────────────────────────────────
-        self._buffer: deque[ScoredMemory] = deque(maxlen=buffer_capacity)
+        self._buffer = PrioritizedBuffer(buffer_capacity)
         self._value_history: Dict[str, deque] = defaultdict(lambda: deque(maxlen=50))
 
         # ── Global Gossip & Skepticism Tracking ───────────────────────────
@@ -186,7 +234,7 @@ class CoffeeShopMediator:
         td_error, social_bonus = self._compute_td_and_bonus(transition)
         priority = self._compute_priority(td_error, social_bonus, transition)
 
-        self._buffer.append(ScoredMemory(transition, td_error, social_bonus, priority))
+        self._buffer.push(ScoredMemory(transition, td_error, social_bonus, priority))
 
     def broadcast(
             self,
@@ -248,28 +296,36 @@ class CoffeeShopMediator:
         accepted = [m for m in top if rng.random() < effective_openness]
         return accepted
 
-    def update_critic(self, batch: List[Transition]) -> float:
+    def update_critic(self, batch: List[ScoredMemory]) -> float:
         """
-        Update the centralized critic with a batch of transitions.
+        Update the centralized critic with a batch of ScoredMemory entries.
 
-        FIX (bug 4): TD targets now use V(s') from a fresh forward pass
-        through self.critic rather than re-using the actor's stale V(s)
-        estimate.  This requires next_global_obs on each Transition.
+        FIX (#9): TD targets now include the social_bonus that was credited to
+        each transition at push() time.  Without this the critic learns to
+        predict raw env reward only, so the social bonus appears as noise to
+        the advantage estimator in PPO.  Including it teaches the critic the
+        full socially-augmented value of each global state.
+
+        TD target: (r + social_bonus) + γ · V(s') · (1 − done)
         """
         if not batch:
             return 0.0
 
-        g_obs      = torch.stack([t.global_obs      for t in batch]).to(self.device)
-        next_g_obs = torch.stack([t.next_global_obs for t in batch]).to(self.device)
-        rwds       = torch.tensor([t.reward for t in batch],
-                                  dtype=torch.float32, device=self.device)
-        dones      = torch.tensor([t.done   for t in batch],
-                                  dtype=torch.float32, device=self.device)
+        g_obs      = torch.stack([sm.transition.global_obs      for sm in batch]).to(self.device)
+        next_g_obs = torch.stack([sm.transition.next_global_obs for sm in batch]).to(self.device)
+        rwds       = torch.tensor(
+            [sm.transition.reward + sm.social_bonus for sm in batch],
+            dtype=torch.float32, device=self.device,
+        )
+        dones      = torch.tensor(
+            [sm.transition.done for sm in batch],
+            dtype=torch.float32, device=self.device,
+        )
 
         with torch.no_grad():
-            # Correct Bellman backup: r + γ · V(s') · (1 - done)
-            v_next      = self.critic(next_g_obs)          # V(s')
-            td_targets  = rwds + self.gamma * v_next * (1.0 - dones)
+            # Bellman backup: (r + social_bonus) + γ · V(s') · (1 − done)
+            v_next     = self.critic(next_g_obs)
+            td_targets = rwds + self.gamma * v_next * (1.0 - dones)
 
         values = self.critic(g_obs)
         loss   = nn.functional.mse_loss(values, td_targets)
@@ -279,7 +335,7 @@ class CoffeeShopMediator:
         nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=0.5)
         self.critic_opt.step()
 
-        self._update_baselines(batch)
+        self._update_baselines([sm.transition for sm in batch])
         return loss.item()
 
     # ------------------------------------------------------------------
@@ -287,15 +343,33 @@ class CoffeeShopMediator:
     # ------------------------------------------------------------------
 
     def _compute_td_and_bonus(self, t: Transition) -> Tuple[float, float]:
-        """Compute (td_error, social_bonus) for a freshly pushed transition."""
+        """
+        Compute (td_error, social_bonus) for a freshly pushed transition.
+
+        FIX (#2): TD error now uses the *centralized critic* V(s_global) for
+        both the baseline and the bootstrap, replacing the actor's local V(s)
+        estimate.  This makes the Mediator's scoring reflect the global-state
+        value function rather than each actor's individual view, which is the
+        architectural intent.
+
+        The critic is called under no_grad so push() incurs no backward cost.
+        Early in training the critic is randomly initialized, so TD errors will
+        be noisy — they become meaningful as update_critic() trains the network.
+        """
         social_bonus = 0.0
         if t.sparse_reward > 0.0:
             social_bonus = self._compute_synergy_bonus(t.agent_id, t.sparse_reward)
 
+        with torch.no_grad():
+            v_s    = self.critic(t.global_obs.unsqueeze(0).to(self.device)).item()
+            v_next = (
+                0.0 if t.done
+                else self.critic(t.next_global_obs.unsqueeze(0).to(self.device)).item()
+            )
+
         effective_reward = t.reward + social_bonus
-        v_next = 0.0 if t.done else t.value_est   # actor estimate; critic not yet updated
-        td_target = effective_reward + self.gamma * v_next
-        td_error  = abs(td_target - t.value_est)
+        td_target        = effective_reward + self.gamma * v_next
+        td_error         = abs(td_target - v_s)
 
         return td_error, social_bonus
 
