@@ -1,39 +1,4 @@
-"""
-scripts/playback.py — CoffeeShop Visualization Utility (Headless Pygame Version)
-==================================================================================
-Renders a saved checkpoint to a GIF by manually scraping Pygame surfaces.
 
-Bug fixes over previous version
----------------------------------
-1.  SDL_VIDEODRIVER=dummy set after pygame.init() — had no effect
-    The env var must be exported BEFORE pygame.init() to prevent pygame
-    from attempting to open a real display.  In headless / WSL environments
-    the old ordering caused an immediate crash on init.
-
-2.  horizon=4000 is 10× the trained episode length
-    Agents are trained with horizon=400.  Running for 4000 steps produces
-    4000 - 400 = 3600 frames of policy behaviour outside the training
-    distribution.  Default changed to 400 to match training.
-
-3.  Final state never rendered
-    states.append() was called before env.step(), so the state produced
-    by the last action was never captured.  The append now happens after
-    the step so every resulting state is included.
-
-4.  Episode termination used all() instead of any()
-    all(terminated.values()) is accidentally correct for Overcooked (all
-    agents terminate together) but semantically wrong and would silently
-    continue past episode end in any env where agents can terminate
-    independently.  Changed to any() to match the rest of the codebase.
-
-5.  Redundant pygame.display.set_mode(1,1)
-    StateVisualizer creates its own surface and does not draw to the
-    display.  The set_mode call was unnecessary and could interfere with
-    the visualizer's surface allocation on some pygame versions.  Removed.
-
-6.  Hardcoded checkpoint path and output filename
-    Added argparse so the script is usable without editing source.
-"""
 
 from __future__ import annotations
 
@@ -91,7 +56,7 @@ def record_peak_performance(
     ckpt_layout  = meta.get("layout",    layout_name)
     ckpt_encoder = meta.get("encoder",   "mlp")
     ckpt_imgshp  = meta.get("img_shape", None)
-    ckpt_hidden  = meta.get("hidden",    128)
+    ckpt_hidden  = meta.get("hidden",    512)
 
     if meta:
         print(f"  meta → env={ckpt_env}, layout={ckpt_layout}, "

@@ -5,7 +5,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import argparse
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, List
 
 import numpy as np
 import torch
@@ -18,41 +18,42 @@ from envs import SocialEnvWrapper
 
 log = get_logger()
 
-
 # ---------------------------------------------------------------------------
 # Evaluation helpers
 # ---------------------------------------------------------------------------
 
 def _mean_over_eps(
         env: SocialEnvWrapper,
-        policy_left,
-        policy_right,
+        actors: Dict[str, Any],
         episodes: int,
         render: bool,
-) -> float:
-    soups = [
-        run_episode(env, policy_left, policy_right, horizon=400, render=render)[0]
-        for _ in range(episodes)
-    ]
-    return float(np.mean(soups))
+) -> Dict[str, float]:
+    """Runs multiple episodes and averages the results."""
+    scores = []
+    deliveries = []
 
+    for _ in range(episodes):
+        res = run_episode(env, actors, horizon=400, render=render)
+        scores.append(res.get("total_team_score", 0.0))
+        # Keep backward compatibility for Overcooked metrics
+        deliveries.append(res.get("total_deliveries", 0.0))
 
-def _load_policy_pair(
+    return {
+        "mean_team_score": float(np.mean(scores)),
+        "mean_deliveries": float(np.mean(deliveries))
+    }
+
+def _load_population(
         obs_dim: int,
         action_dim: int,
         ckpt: str,
-) -> Tuple[ActorFromCheckpoint, ActorFromCheckpoint]:
-    """Load the canonical seat-0 and seat-1 policies from one checkpoint."""
-    left = ActorFromCheckpoint(
-        obs_dim, action_dim, ckpt,
-        key_hints=("env0_agent_0",),
-    )
-    right = ActorFromCheckpoint(
-        obs_dim, action_dim, ckpt,
-        key_hints=("env0_agent_1",),
-    )
-    return left, right
-
+        agent_ids: List[str]
+) -> Dict[str, ActorFromCheckpoint]:
+    """Loads a full population of actors from a single checkpoint."""
+    return {
+        aid: ActorFromCheckpoint(obs_dim, action_dim, ckpt, key_hints=(aid,))
+        for aid in agent_ids
+    }
 
 # ---------------------------------------------------------------------------
 # Evaluation orchestrator
@@ -66,74 +67,76 @@ def evaluate(
         ckpt_b: Optional[str],
         render: bool = False,
 ) -> Dict[str, float]:
-    if not ckpt_a:
-        raise ValueError("--ckpt_a is required for meaningful evaluation.")
-    if not ckpt_b:
-        raise ValueError(
-            "--ckpt_b is required for cross-play evaluation. "
-            "Do not reuse ckpt_a implicitly; that collapses XP into self-play-like behavior."
-        )
 
+    if not ckpt_a or not ckpt_b:
+        raise ValueError("Both --ckpt_a and --ckpt_b are required for cross-play evaluation.")
+
+    # Build Env
     if env_name == "overcooked":
         env_params = {"layout_name": layout}
     elif env_name == "meltingpot":
         env_params = {"scenario": "clean_up"}
     else:
         env_params = {}
+
     env = make_env(env_name, env_params, render_mode=("human" if render else None))
 
     obs_dim = env.obs_dim
     action_dim = env.action_dim
+    agent_ids = env.agent_ids
 
-    # Canonical seat-specialized policies from each run.
-    a_left, a_right = _load_policy_pair(obs_dim, action_dim, ckpt_a)
-    b_left, b_right = _load_policy_pair(obs_dim, action_dim, ckpt_b)
-    rand_pol = RandomPartner(action_dim)
+    # Load Full Populations
+    pop_a = _load_population(obs_dim, action_dim, ckpt_a, agent_ids)
+    pop_b = _load_population(obs_dim, action_dim, ckpt_b, agent_ids)
 
     # ── Protocols ─────────────────────────────────────────────────────────
-    # Self-play: canonical within-checkpoint pairing.
-    sp_a = _mean_over_eps(env, a_left, a_right, episodes, render)
-    sp_b = _mean_over_eps(env, b_left, b_right, episodes, render)
-    sp_mean = float(np.mean([sp_a, sp_b]))
+    results = {}
 
-    # Cross-play: evaluate both cross-seat combinations.
-    # These are the important zero-shot coordination tests across runs.
-    xp_a0_b1 = _mean_over_eps(env, a_left, b_right, episodes, render)
-    xp_b0_a1 = _mean_over_eps(env, b_left, a_right, episodes, render)
-    xp_mean = float(np.mean([xp_a0_b1, xp_b0_a1]))
+    # 1. Self-Play (SP)
+    sp_a = _mean_over_eps(env, pop_a, episodes, render)
+    sp_b = _mean_over_eps(env, pop_b, episodes, render)
 
-    # Optional same-slot stress tests. These can diagnose slot overfitting,
-    # but they are not the primary XP metric.
-    xp_same_left = _mean_over_eps(env, a_left, b_left, episodes, render)
-    xp_same_right = _mean_over_eps(env, a_right, b_right, episodes, render)
+    results["SP/A_team_score"] = sp_a["mean_team_score"]
+    results["SP/B_team_score"] = sp_b["mean_team_score"]
+    results["SP/mean_score"] = float(np.mean([sp_a["mean_team_score"], sp_b["mean_team_score"]]))
 
-    # Robustness: agent from A with a random teammate in the opposite seat.
-    rb_a_left = _mean_over_eps(env, a_left, rand_pol, episodes, render)
-    rb_rand_a_right = _mean_over_eps(env, rand_pol, a_right, episodes, render)
-    rb_mean = float(np.mean([rb_a_left, rb_rand_a_right]))
+    # 2. Cross-Play (XP)
+    # We dynamically test Cross-Play by taking Agent 0 from A and everyone else from B, and vice-versa.
+    xp_scores = []
+
+    for target_aid in agent_ids:
+        # Team 1: Target agent from A, rest from B
+        xp_team_1 = {aid: (pop_a[aid] if aid == target_aid else pop_b[aid]) for aid in agent_ids}
+        res_1 = _mean_over_eps(env, xp_team_1, episodes, render)
+        results[f"XP/A_{target_aid}_B_others"] = res_1["mean_team_score"]
+        xp_scores.append(res_1["mean_team_score"])
+
+        # Team 2: Target agent from B, rest from A
+        xp_team_2 = {aid: (pop_b[aid] if aid == target_aid else pop_a[aid]) for aid in agent_ids}
+        res_2 = _mean_over_eps(env, xp_team_2, episodes, render)
+        results[f"XP/B_{target_aid}_A_others"] = res_2["mean_team_score"]
+        xp_scores.append(res_2["mean_team_score"])
+
+    results["eval/cross_play_score"] = float(np.mean(xp_scores))
+
+    # 3. Robustness (Random Partner)
+    # Target agent from A, rest are random
+    rb_scores = []
+    for target_aid in agent_ids:
+        rb_team = {aid: (pop_a[aid] if aid == target_aid else RandomPartner(action_dim)) for aid in agent_ids}
+        res_rb = _mean_over_eps(env, rb_team, episodes, render)
+        results[f"RB/A_{target_aid}_Rand_others"] = res_rb["mean_team_score"]
+        rb_scores.append(res_rb["mean_team_score"])
+
+    results["RB/mean_score"] = float(np.mean(rb_scores))
 
     env.close()
 
-    results = {
-        "SP/A": sp_a,
-        "SP/B": sp_b,
-        "SP/mean_soups_per_400": sp_mean,
-        "XP/A0_B1": xp_a0_b1,
-        "XP/B0_A1": xp_b0_a1,
-        "XP/mean_soups_per_400": xp_mean,
-        "XP/same_slot_left": xp_same_left,
-        "XP/same_slot_right": xp_same_right,
-        "RB/A0_rand1": rb_a_left,
-        "RB/rand0_A1": rb_rand_a_right,
-        "RB/mean_soups_per_400": rb_mean,
-        "eval/cross_play_score": xp_mean,
-    }
-
+    # Log results
     for k, v in results.items():
-        log.info({k: float(v)})
+        log.info(f"{k}: {float(v):.4f}")
 
     return results
-
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -154,13 +157,7 @@ def main() -> None:
     parser.add_argument("--render", action="store_true")
     args = parser.parse_args()
 
-    # Build env with appropriate params
-    params = {"layout_name": args.layout} if args.env == "overcooked" else ({"scenario": args.mp_scenario} if args.env == "meltingpot" else {})
-    env = make_env(args.env, params, render_mode=("human" if args.render else None))
-
-    # Run evaluate using the constructed env settings
     evaluate(args.env, args.layout, args.episodes, args.ckpt_a, args.ckpt_b, render=args.render)
-
 
 if __name__ == "__main__":
     main()

@@ -236,11 +236,13 @@ class MeltingPotWrapper(SocialEnvWrapper):
                 result[aid] = self._to_tensor(arr)
             return result
 
-        # Case C: single obs shared — replicate for each agent
+        # Case C: single obs shared — give each agent its own tensor.
+        # arr.copy() is required because _to_tensor calls torch.from_numpy()
+        # which shares memory with the numpy array; without a copy every agent
+        # would alias the same underlying buffer.
         arr = self._select_array_from_obs(ts_observation)
-        tens = self._to_tensor(arr)
         for aid in self._agent_ids:
-            result[aid] = tens
+            result[aid] = self._to_tensor(arr.copy())
         return result
 
     def _select_array_from_obs(self, per_player_obs: Any) -> np.ndarray:
@@ -262,7 +264,7 @@ class MeltingPotWrapper(SocialEnvWrapper):
     def _to_tensor(self, arr: np.ndarray) -> torch.Tensor:
         a = np.asarray(arr)
         if a.dtype != np.float32:
-            if np.issubdtype(a.dtype, np.integer) and a.max(initial=1) > 1:
+            if np.issubdtype(a.dtype, np.integer) and a.size > 0 and a.max() > 1:
                 a = a.astype(np.float32) / 255.0
             else:
                 a = a.astype(np.float32)

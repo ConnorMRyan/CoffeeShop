@@ -62,7 +62,11 @@ class TBWriter:
                 "[TBWriter] TensorBoard not installed — console-only logging.\n"
                 "           Install with: pip install tensorboard"
             )
-
+    def flush(self) -> None:
+        """Force write pending events to disk (critical for WSL/Network drives)."""
+        if self._writer is not None:
+            self._writer.flush()
+            
     def add_scalar(self, tag: str, value: float, step: int) -> None:
         if self._writer is not None:
             self._writer.add_scalar(tag, float(value), global_step=step)

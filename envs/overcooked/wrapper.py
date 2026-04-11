@@ -1,37 +1,9 @@
-"""
-envs/overcooked/wrapper.py  —  Real Overcooked-AI integration
-================================================================
-Fixed reward handling, dynamic observation sizing, safer encoding,
-cleaner info logging, and correct terminated/truncated signalling
-for CoffeeShop's SocialEnvWrapper API.
-
-Bug fixes over previous version
----------------------------------
-1.  terminated / truncated  — OvercookedEnv sets done=True for both true
-    task completion and horizon expiry.  We now inspect info["done_info"]
-    for a "timeout" key to disambiguate:
-      • horizon expiry  → terminated=False, truncated=True
-      • genuine done    → terminated=True,  truncated=False
-    This matters for PPO's bootstrapping: a truncated episode should still
-    bootstrap V(s'), while a terminated one should not.
-
-2.  next_state vs self._env.state  — OvercookedEnv.step() returns the raw
-    joint next-state object as its first return value.  We pass that directly
-    to _encode_state rather than re-reading self._env.state, which could
-    theoretically diverge if the environment is stepped again before encoding
-    (e.g. in a vectorised wrapper).
-
-3.  team_reward double-counted  — the previous code gave every agent the
-    full team_reward, inflating the reward signal by N_agents.  team_reward
-    is a shared delivery bonus; each agent receives an equal 1/N share.
-    Shaped rewards remain per-agent and are added on top of each agent's share.
-"""
-
 from __future__ import annotations
 
 import contextlib
 import io
 import logging
+import os
 from typing import Dict, Tuple
 
 import numpy as np
@@ -46,6 +18,31 @@ logging.getLogger("overcooked_ai_py.planning.planners").setLevel(logging.WARNING
 
 # Pre-build the action lookup once at import time
 _ACTION_MAP = Action.ALL_ACTIONS
+
+# ---------------------------------------------------------------------------
+# Custom layout resolution
+# ---------------------------------------------------------------------------
+
+_CUSTOM_LAYOUTS_DIR = os.path.join(os.path.dirname(__file__), "layouts")
+
+
+def _load_mdp(layout_name: str) -> OvercookedGridworld:
+    """
+    Load an OvercookedGridworld by name.  Checks the project-local
+    envs/overcooked/layouts/ directory first so custom layouts can be added
+    without touching the installed overcooked_ai_py package.
+    """
+    custom_path = os.path.join(_CUSTOM_LAYOUTS_DIR, layout_name + ".layout")
+    if os.path.isfile(custom_path):
+        with open(custom_path) as f:
+            params = eval(f.read())  # same eval-based format as overcooked's own layouts
+        # Strip indentation whitespace from each row; drop empty lines produced
+        # by leading/trailing newlines in triple-quoted strings.
+        grid = [row.strip() for row in params["grid"].split("\n") if row.strip()]
+        del params["grid"]
+        params["layout_name"] = layout_name
+        return OvercookedGridworld.from_grid(grid, params)
+    return OvercookedGridworld.from_layout_name(layout_name)
 
 # Number of agents is fixed for Overcooked-AI (always a two-player game)
 _N_AGENTS = 2
@@ -63,18 +60,27 @@ class OvercookedSocialWrapper(SocialEnvWrapper):
             layout_name: str = "cramped_room",
             horizon: int = 400,
             reward_shaping_factor: float = 1.0,
+            inactivity_penalty_magnitude: float = 0.01,
+            inactivity_steps: int = 3,
             render_mode: str | None = None,
             **kwargs,
     ) -> None:
         self._layout_name = layout_name
         self._horizon = horizon
         self._reward_shaping_factor = reward_shaping_factor
+        self._inactivity_penalty_magnitude = inactivity_penalty_magnitude
+        self._inactivity_steps = inactivity_steps
         self._render_mode = render_mode
         self._agent_ids = ["agent_0", "agent_1"]
 
+        # Inactivity tracking
+        self._prev_positions: Dict[str, Tuple[int, int]] = {}
+        self._inactivity_counts: Dict[str, int] = {aid: 0 for aid in self._agent_ids}
+        self._total_inactivity_penalty = 0.0
+
         # Suppress Overcooked-AI startup chatter
         with contextlib.redirect_stdout(io.StringIO()):
-            self._mdp = OvercookedGridworld.from_layout_name(layout_name)
+            self._mdp = _load_mdp(layout_name)
             self._env = OvercookedEnv.from_mdp(
                 self._mdp,
                 horizon=horizon,
@@ -118,6 +124,15 @@ class OvercookedSocialWrapper(SocialEnvWrapper):
         """
         with contextlib.redirect_stdout(io.StringIO()):
             self._env.reset()
+        
+        # Reset inactivity tracking
+        self._prev_positions = {
+            aid: self._env.state.players[i].position 
+            for i, aid in enumerate(self._agent_ids)
+        }
+        self._inactivity_counts = {aid: 0 for aid in self._agent_ids}
+        self._total_inactivity_penalty = 0.0
+
         obs = self._encode_state(self._env.state)
         return obs, {}
 
@@ -135,16 +150,13 @@ class OvercookedSocialWrapper(SocialEnvWrapper):
         joint_action = tuple(_ACTION_MAP[actions[aid]] for aid in self._agent_ids)
 
         # Step the underlying environment.
-        # FIX (bug 2): use the returned next_state directly rather than
-        # re-reading self._env.state after the step, which could diverge
-        # in asynchronous / vectorised settings.
         next_state, team_reward, done, info = self._env.step(joint_action)
 
         # Safely extract per-agent reward components
         shaped = info.get("shaped_r_by_agent", [0.0] * _N_AGENTS)
         sparse = info.get("sparse_r_by_agent",  [0.0] * _N_AGENTS)
 
-        # FIX (bug 3): team_reward is a shared delivery bonus.  Giving every
+        # team_reward is a shared delivery bonus.  Giving every
         # agent the full amount inflates the reward by N_agents.  Each agent
         # receives an equal 1/N share, then adds their own shaped guidance.
         team_reward_per_agent = float(team_reward) / _N_AGENTS
@@ -153,14 +165,39 @@ class OvercookedSocialWrapper(SocialEnvWrapper):
             for i, aid in enumerate(self._agent_ids)
         }
 
+        # Inactivity and Stall Logic
+        step_inactivity_penalty = 0.0
+        step_stalls = {aid: 0 for aid in self._agent_ids}
+        for i, aid in enumerate(self._agent_ids):
+            curr_pos = next_state.players[i].position
+            prev_pos = self._prev_positions.get(aid)
+            is_interacting = (joint_action[i] == Action.INTERACT)
+            
+            # A "stall" is either Action.STAY (index 0) OR moving into a wall (curr_pos == prev_pos when moving)
+            is_stay = (actions[aid] == 0)
+            is_into_wall = (curr_pos == prev_pos and not is_stay and not is_interacting)
+            if is_stay or is_into_wall:
+                step_stalls[aid] = 1
+
+            if curr_pos == prev_pos and not is_interacting:
+                self._inactivity_counts[aid] += 1
+            else:
+                self._inactivity_counts[aid] = 0
+            
+            if self._inactivity_counts[aid] >= self._inactivity_steps:
+                penalty = self._inactivity_penalty_magnitude
+                step_inactivity_penalty += penalty
+                rewards[aid] -= penalty
+            
+            self._prev_positions[aid] = curr_pos
+
+        self._total_inactivity_penalty += step_inactivity_penalty
+
         # Preserve sparse rewards for mediator / gossip logic
         sparse_rewards  = {aid: float(sparse[i])  for i, aid in enumerate(self._agent_ids)}
         shaped_rewards  = {aid: float(shaped[i])  for i, aid in enumerate(self._agent_ids)}
 
-        # FIX (bug 1): disambiguate horizon expiry from genuine termination.
-        # OvercookedEnv populates info["done_info"] with a "timeout" key when
-        # the episode ends because the horizon was reached.  If that key is
-        # present and truthy the episode was truncated, not terminated.
+        # Disambiguate horizon expiry from genuine termination.
         done_info = info.get("done_info", {})
         is_timeout = bool(done_info.get("timeout", False))
 
@@ -174,11 +211,14 @@ class OvercookedSocialWrapper(SocialEnvWrapper):
             truncated  = {aid: False      for aid in self._agent_ids}
 
         infos = {
-            "team_reward":    float(team_reward),
-            "sparse_rewards": sparse_rewards,
-            "shaped_rewards": shaped_rewards,
-            "has_delivery":   any(s > 0 for s in sparse),
-            "is_timeout":     is_timeout,
+            "team_reward":        float(team_reward),
+            "sparse_rewards":     sparse_rewards,
+            "shaped_rewards":     shaped_rewards,
+            "inactivity_penalty": step_inactivity_penalty,
+            "total_inactivity_penalty": self._total_inactivity_penalty,
+            "action_entropy_stall": step_stalls,
+            "has_delivery":       any(s > 0 for s in sparse),
+            "is_timeout":         is_timeout,
         }
 
         return self._encode_state(next_state), rewards, terminated, truncated, infos

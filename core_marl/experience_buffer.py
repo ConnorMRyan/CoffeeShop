@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Tuple
 
@@ -24,9 +25,8 @@ class ExperienceBuffer:
 
     def __init__(self, capacity: int = 1_000) -> None:
         self.capacity = capacity
-        self._storage: List[Tuple[
-            Dict[str, Any], Dict[str, Any], Dict[str, float], Dict[str, bool], Dict[str, bool], Dict[str, Any]
-        ]] = []
+        # deque(maxlen=capacity) gives O(1) FIFO eviction vs list.pop(0) O(n).
+        self._storage: deque = deque(maxlen=capacity)
 
     def add(
         self,
@@ -38,8 +38,6 @@ class ExperienceBuffer:
         next_obs: Dict[str, Any],
         infos: Dict[str, Any] | None = None,
     ) -> None:
-        if len(self._storage) >= self.capacity:
-            self._storage.pop(0)
         self._storage.append((obs, actions, rewards, terminated, truncated, next_obs if next_obs is not None else {}, infos or {}))
 
     def clear(self) -> None:

@@ -22,8 +22,8 @@ def make_env(name: str, params: Dict[str, Any], render_mode: Optional[str] = Non
         from envs.crafter.wrapper import CrafterWrapper
         return CrafterWrapper(**params)
     if name == "nethack":
-        from envs.nethack.wrapper import NetHackWrapper
-        return NetHackWrapper(**params)
+        from envs.nethack.wrapper import NLESocialWrapper
+        return NLESocialWrapper(**params)
     if name == "aisaac":
         from envs.aisaac.wrapper import AIsaacWrapper
         return AIsaacWrapper(**params)
@@ -46,6 +46,7 @@ def make_actors(runner: "VectorSocialRunner", mediator: CoffeeShopMediator, cfg:
             c_vf=a_cfg.c_vf, c_ent=a_cfg.c_ent, ppo_epochs=a_cfg.ppo_epochs,
             mini_batch_size=a_cfg.mini_batch_size, lr=a_cfg.lr, push_every=cfg.trainer.push_every,
             hidden=a_cfg.hidden, encoder=a_cfg.encoder, img_shape=img_shape, device=cfg.trainer.device,
+            vanilla=bool(a_cfg.get("vanilla", False)),
         ) for aid in runner.agent_ids
     }
 
@@ -61,7 +62,9 @@ class VectorSocialRunner:
         obs, infos_all = {}, {}
         for e, env in enumerate(self.envs):
             o, info = env.reset()
-            for i, local_aid in enumerate(env.agent_ids): obs[f"env{e}_agent_{i}"] = o[local_aid]
+            # Cache the agent ID list
+            e_aids = env.agent_ids
+            for i, local_aid in enumerate(e_aids): obs[f"env{e}_agent_{i}"] = o[local_aid]
             infos_all[e] = info
         return obs, infos_all
 
@@ -70,9 +73,11 @@ class VectorSocialRunner:
     def step(self, actions: Dict[str, int]):
         next_obs, rewards, terminated, truncated, infos_all = {}, {}, {}, {}, {}
         for e, env in enumerate(self.envs):
-            env_actions = {local_aid: actions[f"env{e}_agent_{i}"] for i, local_aid in enumerate(env.agent_ids)}
+            # Pre-indexed list of agent IDs is faster than enumerate(env.agent_ids)
+            e_aids = env.agent_ids
+            env_actions = {local_aid: actions[f"env{e}_agent_{i}"] for i, local_aid in enumerate(e_aids)}
             nobs, r, term, trunc, info = env.step(env_actions)
-            for i, local_aid in enumerate(env.agent_ids):
+            for i, local_aid in enumerate(e_aids):
                 gaid = f"env{e}_agent_{i}"
                 next_obs[gaid], rewards[gaid], terminated[gaid], truncated[gaid] = nobs[local_aid], r[local_aid], term[local_aid], trunc[local_aid]
             infos_all[e] = info
@@ -80,6 +85,7 @@ class VectorSocialRunner:
 
     def get_global_obs(self, obs_dict: Dict[str, torch.Tensor], env_idx: int) -> torch.Tensor:
         env = self.envs[env_idx]
+        # Avoid list comprehension and intermediate dict if possible, but Wrapper expects dict
         local_obs = {aid: obs_dict[f"env{env_idx}_agent_{i}"] for i, aid in enumerate(env.agent_ids)}
         return env.get_global_obs(local_obs)
 

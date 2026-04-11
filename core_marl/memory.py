@@ -23,6 +23,7 @@ class Transition:
     sparse_reward:   float                 # isolated sparse signal (e.g. dish served)
     value_est:       float                 # actor's own V(s) estimate at collection time
     done:            bool
+    truncated:       bool = False
     timestamp:       float = field(default_factory=time.monotonic)
 
 @dataclass
@@ -63,11 +64,12 @@ class PrioritizedBuffer:
 
     def sample(self, n: int) -> List[ScoredMemory]:
         """Return a random sample of up to n entries."""
-        items = [m for _, _, m in self._heap]
-        if len(items) <= n:
-            return items
-        indices = np.random.choice(len(items), size=n, replace=False)
-        return [items[i] for i in indices]
+        if not self._heap:
+            return []
+        if len(self._heap) <= n:
+            return [m for _, _, m in self._heap]
+        indices = np.random.choice(len(self._heap), size=n, replace=False)
+        return [self._heap[i][2] for i in indices]
 
     def __iter__(self):
         return (m for _, _, m in self._heap)

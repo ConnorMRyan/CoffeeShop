@@ -9,7 +9,10 @@ c_ent: 0.01
 ppo_epochs: 4
 mini_batch_size: 64
 hidden: 512
-encoder: cnn
+encoder: mlp
 img_c: 3
 img_h: 64
 img_w: 64
+# Set to true for a pure PPO run with no social features (no BC loss, no
+# mediator pushes, no openness updates). Used by the --baseline flag.
+vanilla: false
