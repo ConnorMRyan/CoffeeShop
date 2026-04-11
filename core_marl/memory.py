@@ -4,6 +4,7 @@ import time
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple, TYPE_CHECKING
 import numpy as np
+import threading
 import torch
 
 if TYPE_CHECKING:
@@ -51,28 +52,37 @@ class PrioritizedBuffer:
         self._capacity = capacity
         self._heap: List[tuple] = []   # (priority, counter, ScoredMemory)
         self._counter = 0
+        self._lock = threading.Lock()
 
     def push(self, memory: ScoredMemory) -> None:
-        entry = (memory.priority, self._counter, memory)
-        self._counter += 1
-        if len(self._heap) < self._capacity:
-            heapq.heappush(self._heap, entry)
-        elif memory.priority > self._heap[0][0]:
-            # New memory beats the current worst — replace it.
-            heapq.heapreplace(self._heap, entry)
-        # else: new memory is worse than the current minimum; discard.
+        with self._lock:
+            entry = (memory.priority, self._counter, memory)
+            self._counter += 1
+            if len(self._heap) < self._capacity:
+                heapq.heappush(self._heap, entry)
+            elif memory.priority > self._heap[0][0]:
+                # New memory beats the current worst — replace it.
+                heapq.heapreplace(self._heap, entry)
+            # else: new memory is worse than the current minimum; discard.
 
     def sample(self, n: int) -> List[ScoredMemory]:
         """Return a random sample of up to n entries."""
-        if not self._heap:
-            return []
-        if len(self._heap) <= n:
-            return [m for _, _, m in self._heap]
-        indices = np.random.choice(len(self._heap), size=n, replace=False)
-        return [self._heap[i][2] for i in indices]
+        with self._lock:
+            if not self._heap:
+                return []
+            if len(self._heap) <= n:
+                return [m for _, _, m in self._heap]
+            indices = np.random.choice(len(self._heap), size=n, replace=False)
+            return [self._heap[i][2] for i in indices]
 
     def __iter__(self):
-        return (m for _, _, m in self._heap)
+        with self._lock:
+            # Return a copy of the list of memories for safe iteration
+            # This avoids holding the lock throughout the entire iteration
+            # which could be slow.
+            memories = [m for _, _, m in self._heap]
+        return iter(memories)
 
     def __len__(self) -> int:
-        return len(self._heap)
+        with self._lock:
+            return len(self._heap)

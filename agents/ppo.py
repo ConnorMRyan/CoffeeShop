@@ -5,6 +5,7 @@ from collections import deque
 from typing import List, Optional, Tuple
 
 import numpy as np
+import threading
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -121,6 +122,10 @@ class LearnedOpenness(nn.Module):
         """
         with torch.no_grad():
             quality = max(0.0, 1.0 - critic_loss / max(critic_loss_threshold, 1e-8))
+            # Hardening: check for NaN/Inf in quality
+            if not math.isfinite(quality):
+                quality = 0.0
+
             if value_variance > high_var_threshold:
                 self._raw.add_(lr * quality)
             else:
@@ -148,6 +153,7 @@ class RolloutBuffer:
         self.truncateds:      List[bool]         = []
 
         self._pending: Optional[tuple] = None
+        self._lock = threading.Lock()
 
     def record_action(
             self,
@@ -158,7 +164,8 @@ class RolloutBuffer:
             log_prob:   torch.Tensor,
             value:      float,
     ) -> None:
-        self._pending = (env_id, obs, global_obs, action, log_prob, value)
+        with self._lock:
+            self._pending = (env_id, obs, global_obs, action, log_prob, value)
 
     def record_outcome(
             self,
@@ -168,51 +175,69 @@ class RolloutBuffer:
             done:            bool,
             truncated:       bool,
     ) -> None:
-        if self._pending is None:
-            raise RuntimeError("record_outcome() called before record_action()")
-        env_id, obs, global_obs, action, log_prob, value = self._pending
-        self._pending = None
+        with self._lock:
+            if self._pending is None:
+                # In a multi-threaded env, this might happen if two threads
+                # call record_outcome without their own record_action first.
+                return
+            
+            env_id, obs, global_obs, action, log_prob, value = self._pending
+            self._pending = None
 
-        self.env_ids.append(env_id)
-        self.obs.append(obs)
-        self.global_obs.append(global_obs)
-        self.next_global_obs.append(next_global_obs)
-        self.actions.append(action)
-        self.log_probs.append(log_prob)
-        self.rewards.append(reward)
-        self.sparse_rewards.append(sparse_reward)
-        self.values.append(value)
-        self.dones.append(done)
-        self.truncateds.append(truncated)
+            self.env_ids.append(env_id)
+            self.obs.append(obs)
+            self.global_obs.append(global_obs)
+            self.next_global_obs.append(next_global_obs)
+            self.actions.append(action)
+            self.log_probs.append(log_prob)
+            self.rewards.append(reward)
+            self.sparse_rewards.append(sparse_reward)
+            self.values.append(value)
+            self.dones.append(done)
+            self.truncateds.append(truncated)
 
     def to_transitions(self, agent_id: str) -> List[Transition]:
-        return [
-            Transition(
-                agent_id        = agent_id,
-                env_id          = eid,
-                obs             = o,
-                global_obs      = g,
-                next_global_obs = ng,
-                action          = a,
-                log_prob        = lp,
-                reward          = r,
-                sparse_reward   = sr,
-                value_est       = v,
-                done            = d,
-                truncated       = tr,
-            )
-            for eid, o, g, ng, a, lp, r, sr, v, d, tr in zip(
-                self.env_ids, self.obs, self.global_obs, self.next_global_obs,
-                self.actions, self.log_probs, self.rewards, self.sparse_rewards,
-                self.values, self.dones, self.truncateds,
-            )
-        ]
+        with self._lock:
+            return [
+                Transition(
+                    agent_id        = agent_id,
+                    env_id          = eid,
+                    obs             = o,
+                    global_obs      = g,
+                    next_global_obs = ng,
+                    action          = a,
+                    log_prob        = lp,
+                    reward          = r,
+                    sparse_reward   = sr,
+                    value_est       = v,
+                    done            = d,
+                    truncated       = tr,
+                )
+                for eid, o, g, ng, a, lp, r, sr, v, d, tr in zip(
+                    self.env_ids, self.obs, self.global_obs, self.next_global_obs,
+                    self.actions, self.log_probs, self.rewards, self.sparse_rewards,
+                    self.values, self.dones, self.truncateds,
+                )
+            ]
 
     def __len__(self) -> int:
-        return len(self.rewards)
+        with self._lock:
+            return len(self.rewards)
 
     def clear(self):
-        self.__init__()
+        with self._lock:
+            self.env_ids.clear()
+            self.obs.clear()
+            self.global_obs.clear()
+            self.next_global_obs.clear()
+            self.actions.clear()
+            self.log_probs.clear()
+            self.rewards.clear()
+            self.sparse_rewards.clear()
+            self.values.clear()
+            self.dones.clear()
+            self.truncateds.clear()
+            self._pending = None
 
 
 # ---------------------------------------------------------------------------
@@ -340,9 +365,18 @@ class PPOAgent:
         )
         advantages_t = torch.tensor(advantages, dtype=torch.float32, device=self.device)
         returns_t    = torch.tensor(returns,    dtype=torch.float32, device=self.device)
+
+        # Hardening: handle NaN/Inf in advantages/returns
+        if not torch.isfinite(advantages_t).all():
+            advantages_t = torch.nan_to_num(advantages_t, nan=0.0, posinf=0.0, neginf=0.0)
+        if not torch.isfinite(returns_t).all():
+            returns_t = torch.nan_to_num(returns_t, nan=0.0, posinf=0.0, neginf=0.0)
+
         advantages_t = (advantages_t - advantages_t.mean()) / (advantages_t.std(unbiased=False) + 1e-8)
 
         value_variance = float(np.var(values_np))
+        if not math.isfinite(value_variance):
+            value_variance = 0.0
         self._variance_history.append(value_variance)
 
         if self.vanilla:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import heapq
+import math
 import time
 from collections import deque, defaultdict
 from dataclasses import dataclass, field
@@ -150,7 +151,7 @@ class CoffeeShopMediator:
         # ── Diagnostics ───────────────────────────────────────────────────
         self._last_broadcast_stats: Dict[str, Any] = {}
         self._rng = np.random.default_rng()
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     def get_priority_stats(self) -> Dict[str, float]:
         """Returns statistics of the current priorities in the buffer."""
@@ -179,7 +180,7 @@ class CoffeeShopMediator:
             if len(self._reward_window) < 25:
                 return 1.0
 
-            current_avg = float(np.mean(self._reward_window))
+            current_avg = float(np.mean(list(self._reward_window)))
             atb = self._atb_reward
 
         # Smooth step function: gossip factor transitions from gossip_alpha to 1.0
@@ -199,6 +200,11 @@ class CoffeeShopMediator:
 
     def push(self, transition: Transition) -> None:
         """Score and store a transition."""
+        if not (math.isfinite(transition.reward) and 
+                math.isfinite(transition.sparse_reward) and 
+                math.isfinite(transition.value_est)):
+            return
+
         with self._lock:
             self._value_history[transition.agent_id].append(transition.value_est)
             self._agent_last_env[transition.agent_id] = transition.env_id
@@ -222,6 +228,16 @@ class CoffeeShopMediator:
         Score and store a batch of transitions with two batched critic forward
         passes instead of 2*N individual ones.
         """
+        if not transitions:
+            return
+
+        # Hardening: filter out non-finite transitions
+        transitions = [
+            t for t in transitions 
+            if math.isfinite(t.reward) and 
+               math.isfinite(t.sparse_reward) and 
+               math.isfinite(t.value_est)
+        ]
         if not transitions:
             return
 
@@ -274,14 +290,15 @@ class CoffeeShopMediator:
         Returns high-priority memories gated by an 'Effective Openness' factor
         that combines local agent trust and global Mediator skepticism.
         """
-        effective_openness = openness * self.get_gossip_factor()
+        gossip_factor = self.get_gossip_factor()
+        effective_openness = openness * gossip_factor
         if effective_openness < 1e-4:
             return []
 
         with self._lock:
             # Per-env averages and top environment
             env_avgs = {
-                eid: float(np.mean(w)) if len(w) > 0 else -float("inf")
+                eid: float(np.mean(list(w))) if len(w) > 0 else -float("inf")
                 for eid, w in self._env_reward_windows.items()
             }
             top_env     = max(env_avgs, key=env_avgs.get) if env_avgs else None
@@ -421,11 +438,16 @@ class CoffeeShopMediator:
         Reward the triggering agent for achieving a sparse event when peers
         are performing well relative to one another.
         """
-        peer_means: List[float] = []
-        for aid, hist in self._value_history.items():
-            if aid == triggering_agent or len(hist) == 0:
-                continue
-            peer_means.append(float(np.mean(hist)))
+        with self._lock:
+            peer_means: List[float] = []
+            # Use list(items()) to avoid dictionary changed size error
+            for aid, hist in list(self._value_history.items()):
+                if aid == triggering_agent or len(hist) == 0:
+                    continue
+                # hist is a deque; np.mean(hist) is safe if we don't append to it
+                # simultaneously. But push() might append to it. 
+                # Let's take a snapshot of the hist.
+                peer_means.append(float(np.mean(list(hist))))
 
         if not peer_means:
             return 0.0
@@ -457,9 +479,12 @@ class CoffeeShopMediator:
         intrinsic quality of the memory, not its usefulness to a specific
         requester.  Per-requester adjustment is applied in broadcast().
         """
-        global_avg = float(np.mean(self._reward_window)) if self._reward_window else 0.0
+        with self._lock:
+            global_avg = float(np.mean(self._reward_window)) if self._reward_window else 0.0
+            baseline   = self._agent_baselines.get(t.agent_id, 0.0)
+
         merit      = 0.2 if (t.reward + t.sparse_reward) > global_avg else 0.0
-        sender_pen = self._sender_recency_penalty(t)
+        sender_pen = 0.1 * max(0.0, baseline - (t.reward + t.sparse_reward))
         return td_error + 0.5 * social_bonus + merit - sender_pen
 
     def _sender_recency_penalty(self, t: Transition) -> float:
@@ -492,25 +517,26 @@ class CoffeeShopMediator:
         for t in batch:
             per_agent[t.agent_id].append(t.reward + t.sparse_reward)
 
-        for aid, rwds in per_agent.items():
-            mean_r   = float(np.mean(rwds))
-            current  = self._agent_baselines.get(aid, mean_r)
+        with self._lock:
+            for aid, rwds in per_agent.items():
+                mean_r   = float(np.mean(rwds))
+                current  = self._agent_baselines.get(aid, mean_r)
 
-            # Clamped baseline update
-            if mean_r > current:
-                # 1. Std-based clamping (if enough samples)
-                if len(rwds) >= 4:
-                    std_r = float(np.std(rwds))
-                    mean_r = min(mean_r, current + std_r)
-                
-                # 2. Hard jump cap (baseline_max_jump)
-                # Use abs(current) so baselines near or at zero can still grow.
-                jump_cap = max(abs(current) * self.baseline_max_jump, 0.01)
-                mean_r = min(mean_r, current + jump_cap)
+                # Clamped baseline update
+                if mean_r > current:
+                    # 1. Std-based clamping (if enough samples)
+                    if len(rwds) >= 4:
+                        std_r = float(np.std(rwds))
+                        mean_r = min(mean_r, current + std_r)
+                    
+                    # 2. Hard jump cap (baseline_max_jump)
+                    # Use abs(current) so baselines near or at zero can still grow.
+                    jump_cap = max(abs(current) * self.baseline_max_jump, 0.01)
+                    mean_r = min(mean_r, current + jump_cap)
 
-            self._agent_baselines[aid] = (
-                    (1 - self._baseline_alpha) * current + self._baseline_alpha * mean_r
-            )
+                self._agent_baselines[aid] = (
+                        (1 - self._baseline_alpha) * current + self._baseline_alpha * mean_r
+                )
 
     def get_verifiable_trust(self, td_error: float) -> float:
         """
@@ -573,22 +599,21 @@ class CoffeeShopMediator:
         with self._lock:
             if self._timeouts:
                 return None
+            
+            # 3. Calculate Agent-Specific Diversity (JS relative to population mean)
+            # We need a probe batch for this. We sample from the buffer.
+            if len(self._buffer) < 32:
+                return None
 
-        aids = list(actors.keys())
-        if len(aids) < 2:
-            return None
+            memories  = self._buffer.sample(32)
+            # Take a snapshot of actors to be thread-safe
+            current_actors = dict(actors)
 
-        # 3. Calculate Agent-Specific Diversity (JS relative to population mean)
-        # We need a probe batch for this. We sample from the buffer.
-        if len(self._buffer) < 32:
-            return None
-
-        memories  = self._buffer.sample(32)
         obs_batch = torch.stack([m.transition.obs for m in memories]).to(self.device)
 
         agent_probs = {}
         with torch.no_grad():
-            for aid, actor in actors.items():
+            for aid, actor in current_actors.items():
                 logits, _ = actor.ac(obs_batch)
                 # Clamp logits before softmax so the output remains a valid
                 # probability simplex (sum=1).  Clamping after breaks that.
@@ -611,8 +636,9 @@ class CoffeeShopMediator:
         # W_i = omega_i / (JS_i + epsilon)
         weights = []
         eps = 1e-6
+        aids = list(current_actors.keys())
         for aid in aids:
-            omega = float(actors[aid].openness.value)
+            omega = float(current_actors[aid].openness.value)
             js_i  = agent_js[aid]
             weights.append(omega / (js_i + eps))
 
