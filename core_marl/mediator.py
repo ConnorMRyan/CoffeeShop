@@ -183,7 +183,7 @@ class CoffeeShopMediator:
             current_avg = float(np.mean(list(self._reward_window)))
             atb = self._atb_reward
 
-        # Smooth step function: gossip factor transitions from gossip_alpha to 1.0
+        # Step function: gossip factor transitions from gossip_alpha to 1.0
         # as current_avg approaches 0.7 * atb.
         threshold = 0.7 * atb
         if current_avg < threshold:
@@ -214,8 +214,11 @@ class CoffeeShopMediator:
             self._env_reward_windows[transition.env_id].append(total_r)
 
             if self._reward_window:
-                current_global_avg = float(np.mean(self._reward_window))
-                self._atb_reward = max(self._atb_reward, current_global_avg)
+                current_global_avg = float(np.mean(list(self._reward_window)))
+                if self._atb_reward == -float("inf"):
+                    self._atb_reward = current_global_avg
+                else:
+                    self._atb_reward = max(self._atb_reward, current_global_avg)
 
         td_error, social_bonus = self._compute_td_and_bonus(transition)
         priority = self._compute_priority(td_error, social_bonus, transition)
@@ -250,7 +253,11 @@ class CoffeeShopMediator:
                 self._env_reward_windows[t.env_id].append(total_r)
 
             if self._reward_window:
-                self._atb_reward = max(self._atb_reward, float(np.mean(self._reward_window)))
+                current_global_avg = float(np.mean(list(self._reward_window)))
+                if self._atb_reward == -float("inf"):
+                    self._atb_reward = current_global_avg
+                else:
+                    self._atb_reward = max(self._atb_reward, current_global_avg)
 
         g_obs      = torch.stack([t.global_obs      for t in transitions]).to(self.device, non_blocking=True)
         next_g_obs = torch.stack([t.next_global_obs for t in transitions]).to(self.device, non_blocking=True)

@@ -1,54 +1,68 @@
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Tuple
+from typing import Dict, List, Tuple
+
+import torch
 
 
 class SocialEnvWrapper(ABC):
-    """Abstract base class for environment wrappers in CoffeeShop.
+    """Abstract base class for CoffeeShop multi-agent environments.
 
-    All environment wrappers must accept and return data using a dictionary pattern
-    keyed by agent IDs (e.g., {"agent_0": data, "agent_1": data}). This ensures
-    consistent multi-agent data routing throughout the pipeline.
+    Contract:
+      - All inputs/outputs are dictionaries keyed by `agent_id` strings.
+      - Observations are PyTorch tensors.
+      - `step()` returns the Gymnasium v0.29 style tuple plus an `infos` dict
+        that MUST include `"sparse_rewards"` mapping each `agent_id` to float.
     """
 
-    def __init__(self, env_name: str, agent_ids: List[str]) -> None:
-        self.env_name = env_name
-        self.agent_ids = agent_ids
-
+    # ---- Required properties ----
+    @property
     @abstractmethod
-    def reset(self) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """Reset the environment.
+    def agent_ids(self) -> List[str]:
+        """Stable ordering of agent identifiers (e.g., ["agent_0", "agent_1"])."""
+        raise NotImplementedError
 
-        Returns a tuple of (obs_dict, infos_dict), where each is a dictionary
-        keyed by agent_id with the corresponding observation or info data.
-        """
+    @property
+    @abstractmethod
+    def obs_dim(self) -> int:
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def action_dim(self) -> int:
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def global_obs_dim(self) -> int:
+        raise NotImplementedError
+
+    # ---- Core API ----
+    @abstractmethod
+    def reset(self) -> Tuple[Dict[str, torch.Tensor], dict]:
+        """Reset the environment and return initial observations per agent."""
         raise NotImplementedError
 
     @abstractmethod
-    def step(self, actions_dict: Dict[str, Any]) -> Tuple[
-        Dict[str, Any], Dict[str, float], Dict[str, bool], Dict[str, bool], Dict[str, Any]
+    def step(
+        self, actions: Dict[str, int]
+    ) -> Tuple[
+        Dict[str, torch.Tensor],  # observations per agent
+        Dict[str, float],         # rewards per agent (dense)
+        Dict[str, bool],          # terminated per agent
+        Dict[str, bool],          # truncated per agent
+        dict,                     # infos dict; MUST include top-level key "sparse_rewards"
     ]:
-        """Perform one environment step given multi-agent actions.
-
-        Args:
-            actions_dict: Dictionary keyed by agent_id with action data.
-
-        Returns:
-            A tuple of (obs_dict, rewards_dict, terminated_dict, truncated_dict, infos_dict),
-            where each is a dictionary keyed by agent_id with the corresponding data.
-            All outputs must strictly follow the dictionary pattern.
-        """
+        """Perform one environment step given discrete actions per agent."""
         raise NotImplementedError
 
     @abstractmethod
-    def get_global_obs(self, obs_dict: Dict[str, Any], env_id: int = 0) -> Any:
-        """Return a global observation for the centralized critic.
-
-        In some environments, this might be a concatenation of all local
-        observations; in others, it's a dedicated global state.
-        """
+    def get_global_obs(self, obs_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """Assemble a single global observation tensor from per-agent obs."""
         raise NotImplementedError
 
     @abstractmethod
     def close(self) -> None:
-        """Release resources if any."""
+        """Release any resources (noop by default)."""
         raise NotImplementedError

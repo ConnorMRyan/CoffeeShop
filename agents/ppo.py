@@ -130,8 +130,8 @@ class LearnedOpenness(nn.Module):
                 self._raw.add_(lr * quality)
             else:
                 self._raw.sub_(lr)
-            # clamp: [logit(0.05), logit(0.667)]
-            self._raw.clamp_(-2.944, 0.693)
+            # clamp: [logit(0.05), logit(0.75)]
+            self._raw.clamp_(-2.944, 1.0986)
 
 
 # ---------------------------------------------------------------------------
@@ -303,9 +303,6 @@ class PPOAgent:
 
         self._variance_history: deque[float] = deque(maxlen=50)
 
-        # FIX (bug 8d): written by train.py after each mediator critic update.
-        # Default 1.0 sits below the 2.0 threshold so early updates behave
-        # normally while the critic warms up.
         self._last_critic_loss: float = 1.0
 
     # ------------------------------------------------------------------
@@ -388,7 +385,6 @@ class PPOAgent:
             if no_delivery and genuinely_stuck:
                 self.openness.force_reset()
             else:
-                # FIX (bug 8a): pass critic loss so upward nudge is quality-gated.
                 self.openness.update_from_variance(
                     value_variance,
                     critic_loss=self._last_critic_loss,
@@ -406,8 +402,7 @@ class PPOAgent:
         if not self.vanilla:
             if self._update_count % self.pull_every == 0:
                 peer_memories = self.mediator.broadcast(self.agent_id, self.openness.value)
-            # FIX: Q is now derived from the mediator's global state directly if available,
-            # but we fallback to a safe default if not provided to this agent.
+            
             # Using mediator's gossip factor as a proxy for Q if we want local sensitivity.
             critic_quality = self.mediator.get_verifiable_trust(getattr(self, "_last_critic_loss", 1.0))
 

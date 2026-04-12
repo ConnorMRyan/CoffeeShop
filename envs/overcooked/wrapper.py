@@ -60,7 +60,7 @@ class OvercookedSocialWrapper(SocialEnvWrapper):
             layout_name: str = "cramped_room",
             horizon: int = 400,
             reward_shaping_factor: float = 1.0,
-            inactivity_penalty_magnitude: float = 0.01,
+            inactivity_penalty_magnitude: float = 0.00,
             inactivity_steps: int = 3,
             render_mode: str | None = None,
             **kwargs,

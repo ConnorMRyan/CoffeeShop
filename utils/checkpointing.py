@@ -32,11 +32,15 @@ class Checkpointer:
     filename:
         Default filename used when save()/load() are called without an
         explicit filename argument.
+    run_args:
+        A dictionary or OmegaConf object containing the run arguments to be
+        stored in the checkpoint.
     """
 
     dirpath:  str = "checkpoints"
     run_id:   str = field(default_factory=_utc_timestamp)
     filename: str = "latest.pt"
+    run_args: Optional[Dict[str, Any]] = None
 
     @property
     def run_dir(self) -> Path:
@@ -53,12 +57,23 @@ class Checkpointer:
             raise RuntimeError("Checkpointing requires PyTorch.")
         self._ensure_dir()
         dest = self.run_dir / (filename or self.filename)
+        
+        # We create a new dict for the actual on-disk format
         to_save: Dict[str, Any] = {}
+        
+        # 1. Process the incoming state (models, buffers, etc.)
         for k, v in state.items():
             if hasattr(v, "state_dict") and callable(v.state_dict):
                 to_save[k] = v.state_dict()
             else:
                 to_save[k] = v
+        
+        # 2. Include run_args in the checkpoint if available
+        if self.run_args is not None:
+            to_save["run_args"] = self.run_args
+        elif "run_args" in state:
+            to_save["run_args"] = state["run_args"]
+            
         torch.save(to_save, str(dest))
         return str(dest)
 
