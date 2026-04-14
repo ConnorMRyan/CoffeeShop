@@ -21,9 +21,9 @@ Data flows: Env → VectorSocialRunner → PPOAgents (act/observe) → CoffeeSho
 - **Logging**: Supports `TensorBoard` and `Weights & Biases` (`WandbWriter` in `utils/__init__.py`).
 
 ## Workflows
-- **Training**: `python scripts/train.py env=overcooked env.layout=cramped_room trainer.total_steps=2000000`. CLI overrides use dot-notation for nested YAML fields.
-- **Cross-play Evaluation**: `python scripts/eval.py --env <env> --ckpt_a <path> --ckpt_b <path> --episodes 5`. For overcooked, add --layout <layout>. Uses `ActorFromCheckpoint` and `run_episode` from `utils/evaluation.py`. For 2-agent environments like crafter, use `python scripts/evaluate.py --env crafter --ckpt_a <path> --ckpt_b <path> --episodes 5`.
-- **Playback**: `python scripts/playback.py <checkpoint.pt> --output out.gif --layout cramped_room`. Renders saved checkpoints to GIF. (Overcooked only)
+- **Training**: `python coffeeshop/train.py env=overcooked env.layout=cramped_room trainer.total_steps=2000000`. CLI overrides use dot-notation for nested YAML fields.
+- **Cross-play Evaluation**: `python coffeeshop/eval.py --env <env> --ckpt_a <path> --ckpt_b <path> --episodes 5`. For overcooked, add --layout <layout>. Uses `ActorFromCheckpoint` and `run_episode` from `utils/evaluation.py`. For 2-agent environments like crafter, use `python coffeeshop/evaluate.py --env crafter --ckpt_a <path> --ckpt_b <path> --episodes 5`.
+- **Playback**: `python coffeeshop/playback.py <checkpoint.pt> --output out.gif --layout cramped_room`. Renders saved checkpoints to GIF. (Overcooked only)
 - **Adding Envs**: Implement `SocialEnvWrapper` subclass in `envs/{name}/wrapper.py`; register in `make_env` (`utils/factory.py`).
 - **Implementing Agents**: Extend `agents/{agent}.py`; wire to PyTorch models; use `RolloutBuffer` / `ExperienceBuffer`.
 - **Checkpointing**: `Checkpointer(dirpath, run_id).save(state_dict)` saves under `checkpoints/{run_id}/`. Keys include `env{e}_agent_{i}`, `mediator`, and `step`.
@@ -34,4 +34,4 @@ Data flows: Env → VectorSocialRunner → PPOAgents (act/observe) → CoffeeSho
 - **Termination vs Truncation**: Strictly distinguished for GAE bootstrapping. `truncated=True` triggers V(s') bootstrapping; `terminated=True` does not.
 - **Population Diversity**: Calculated using JS divergence on a shared probe batch sampled from the `Mediator`.
 
-Reference: `core_marl/`, `utils/factory.py`, `utils/evaluation.py`, `agents/ppo.py`, `scripts/train.py`, `configs/`, `ARCHITECTURE.md`.
+Reference: `core_marl/`, `utils/factory.py`, `utils/evaluation.py`, `agents/ppo.py`, `coffeeshop/train.py`, `configs/`, `ARCHITECTURE.md`.

@@ -1,6 +1,6 @@
 """Utilities for CoffeeShop: logger, metrics, and TensorBoard writer.
 
-This module intentionally provides a very small surface so scripts/train.py
+This module intentionally provides a very small surface so coffeeshop/train.py
 can run in environments without optional logging libraries.
 """
 from __future__ import annotations

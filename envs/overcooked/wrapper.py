@@ -156,12 +156,10 @@ class OvercookedSocialWrapper(SocialEnvWrapper):
         shaped = info.get("shaped_r_by_agent", [0.0] * _N_AGENTS)
         sparse = info.get("sparse_r_by_agent",  [0.0] * _N_AGENTS)
 
-        # team_reward is a shared delivery bonus.  Giving every
-        # agent the full amount inflates the reward by N_agents.  Each agent
-        # receives an equal 1/N share, then adds their own shaped guidance.
-        team_reward_per_agent = float(team_reward) / _N_AGENTS
+        # Raw rewards for the mediator to handle averaging.
+        # This stops reward data leakage in the centralized critic.
         rewards = {
-            aid: team_reward_per_agent + float(shaped[i]) * self._reward_shaping_factor
+            aid: float(team_reward) / _N_AGENTS + float(shaped[i]) * self._reward_shaping_factor
             for i, aid in enumerate(self._agent_ids)
         }
 

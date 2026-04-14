@@ -151,6 +151,7 @@ class RolloutBuffer:
         self.values:          List[float]        = []
         self.dones:           List[bool]         = []
         self.truncateds:      List[bool]         = []
+        self._last_val:       float              = 0.0
 
         self._pending: Optional[tuple] = None
         self._lock = threading.Lock()
@@ -220,6 +221,28 @@ class RolloutBuffer:
                 )
             ]
 
+    def get(self, last_val: float = 0.0) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Convert buffer content to stacked tensors/arrays for training."""
+        with self._lock:
+            if not self.rewards:
+                # Return empty structures if buffer is empty
+                return (
+                    torch.empty(0), torch.empty(0), torch.empty(0),
+                    np.empty(0), np.empty(0), np.empty(0), np.empty(0), np.empty(0)
+                )
+
+            obs_t         = torch.stack(self.obs)
+            actions_t     = torch.stack(self.actions)
+            log_probs_t   = torch.stack(self.log_probs)
+            
+            vals          = np.array(self.values + [last_val])
+            rewards       = np.array(self.rewards)
+            sparse        = np.array(self.sparse_rewards)
+            dones         = np.array(self.dones)
+            truncateds    = np.array(self.truncateds)
+
+            return obs_t, actions_t, log_probs_t, vals, rewards, sparse, dones, truncateds
+
     def __len__(self) -> int:
         with self._lock:
             return len(self.rewards)
@@ -237,6 +260,7 @@ class RolloutBuffer:
             self.values.clear()
             self.dones.clear()
             self.truncateds.clear()
+            self._last_val = 0.0
             self._pending = None
 
 
@@ -248,8 +272,8 @@ class PPOAgent:
     def __init__(
             self,
             agent_id:        str,
-            obs_dim:         int,
-            action_dim:      int,
+            obs_space:       Optional[int],
+            act_space:       Optional[int],
             global_obs_dim:  int,
             mediator:        CoffeeShopMediator,
             gamma:           float = 0.99,
@@ -268,6 +292,11 @@ class PPOAgent:
             device:          str   = "cpu",
             vanilla:         bool  = False,
     ):
+        if obs_space is None:
+            raise ValueError("obs_space is None; cannot initialize PPOAgent without state dimensions.")
+        if act_space is None:
+            raise ValueError("act_space is None; cannot initialize PPOAgent without action dimensions.")
+
         self.agent_id        = agent_id
         self.gamma           = gamma
         self.lam             = lam
@@ -281,18 +310,19 @@ class PPOAgent:
         self.device          = torch.device(device)
         self.vanilla         = vanilla
 
-        self.ac       = ActorCriticNet(
-            obs_dim, action_dim,
+        self.model    = ActorCriticNet(
+            obs_space, act_space,
             hidden    = hidden,
             encoder   = encoder,
             img_shape = img_shape,
         ).to(self.device)
+        self.ac        = self.model  # Backward compatibility alias
         self.openness  = LearnedOpenness(init_omega=0.5)
         # Vanilla mode: optimizer covers only the actor-critic network.
         # Social mode: also includes openness so ω is learned end-to-end.
         opt_params = (
-            self.ac.parameters() if vanilla
-            else list(self.ac.parameters()) + list(self.openness.parameters())
+            self.model.parameters() if vanilla
+            else list(self.model.parameters()) + list(self.openness.parameters())
         )
         self.optimizer = torch.optim.Adam(opt_params, lr=lr, eps=1e-5)
 
@@ -314,10 +344,17 @@ class PPOAgent:
             env_id:     int,
             obs:        torch.Tensor,
             global_obs: torch.Tensor,
+            deterministic: bool = False,
     ) -> torch.Tensor:
         # Tensors are now moved to device in the training loop for batching performance
         with torch.no_grad():
-            action, log_prob, value = self.ac.act(obs)
+            logits, value = self.model(obs)
+            dist          = Categorical(logits=logits)
+            if deterministic:
+                action = logits.argmax(dim=-1)
+            else:
+                action = dist.sample()
+            log_prob = dist.log_prob(action)
 
         self.buffer.record_action(env_id, obs, global_obs, action, log_prob, value.item())
         return action
@@ -338,24 +375,20 @@ class PPOAgent:
             self._push_to_mediator()
 
     def update(self, last_obs: Optional[torch.Tensor] = None) -> dict:
-        transitions = self.buffer.to_transitions(self.agent_id)
-        if not transitions:
-            return {}
-
-        obs_t        = torch.stack([t.obs        for t in transitions]).to(self.device)
-        actions_t    = torch.stack([t.action     for t in transitions]).to(self.device)
-        old_lp_t     = torch.stack([t.log_prob   for t in transitions]).to(self.device)
-        values_np    = np.array([t.value_est     for t in transitions])
-        rewards_np   = np.array([t.reward        for t in transitions])
-        sparse_np    = np.array([t.sparse_reward for t in transitions])
-        dones_np     = np.array([t.done      for t in transitions], dtype=bool)
-        truncated_np = np.array([t.truncated for t in transitions], dtype=bool)
-
-        last_value = 0.0
+        last_value = self.buffer._last_val
         if last_obs is not None:
             with torch.no_grad():
-                _, last_val_t = self.ac(last_obs.to(self.device).unsqueeze(0))
+                _, last_val_t = self.model(last_obs.to(self.device).unsqueeze(0))
                 last_value = last_val_t.item()
+
+        obs_t, actions_t, old_lp_t, values_np, rewards_np, sparse_np, dones_np, truncated_np = self.buffer.get(last_val=last_value)
+        
+        if len(rewards_np) == 0:
+            return {}
+
+        obs_t    = obs_t.to(self.device).detach()
+        actions_t = actions_t.to(self.device).detach()
+        old_lp_t = old_lp_t.to(self.device).detach()
 
         advantages, returns = self._compute_gae(
             values_np, rewards_np, dones_np, truncated_np, last_value,
@@ -406,11 +439,11 @@ class PPOAgent:
             # Using mediator's gossip factor as a proxy for Q if we want local sensitivity.
             critic_quality = self.mediator.get_verifiable_trust(getattr(self, "_last_critic_loss", 1.0))
 
-        n   = len(transitions)
+        n   = len(rewards_np)
         idx = np.arange(n)
         metrics: dict = {
             "policy_loss": [], "value_loss": [], "entropy": [],
-            "grad_norm_actor": [], "grad_norm_critic": []
+            "grad_norm": []
         }
         if not self.vanilla:
             metrics["bc_loss"]        = []
@@ -423,7 +456,7 @@ class PPOAgent:
                 if len(mb) == 0:
                     continue
 
-                logits, values = self.ac(obs_t[mb])
+                logits, values = self.model(obs_t[mb])
                 dist           = Categorical(logits=logits)
                 new_log_probs  = dist.log_prob(actions_t[mb])
                 entropy        = dist.entropy().mean()
@@ -436,7 +469,7 @@ class PPOAgent:
 
                 if self.vanilla:
                     L_total = L_clip + self.c_vf * L_vf - current_c_ent * entropy
-                    clip_params = list(self.ac.parameters())
+                    clip_params = list(self.model.parameters())
                 else:
                     L_bc            = self._behavior_cloning_loss(peer_memories)
                     omega_mask      = self.mediator.get_omega_mask(self.agent_id)
@@ -448,18 +481,14 @@ class PPOAgent:
                             - current_c_ent * entropy
                             + effective_omega * critic_quality * L_bc
                     )
-                    clip_params = list(self.ac.parameters()) + list(self.openness.parameters())
+                    clip_params = list(self.model.parameters()) + list(self.openness.parameters())
 
                 self.optimizer.zero_grad(set_to_none=True)
                 L_total.backward()
 
-                # Calculate grad norms before clipping
-                gn_actor = nn.utils.clip_grad_norm_(self.ac.actor_head.parameters(), max_norm=1e9)
-                gn_critic = nn.utils.clip_grad_norm_(self.ac.critic_head.parameters(), max_norm=1e9)
-                metrics["grad_norm_actor"].append(gn_actor.item())
-                metrics["grad_norm_critic"].append(gn_critic.item())
-
-                nn.utils.clip_grad_norm_(clip_params, max_norm=0.5)
+                # Robust gradient clipping on the model parameters as per architect instructions
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5)
+                metrics["grad_norm"].append(grad_norm.item())
                 self.optimizer.step()
 
                 metrics["policy_loss"].append(L_clip.item())
@@ -488,8 +517,8 @@ class PPOAgent:
         weights      = F.softmax(priorities, dim=0).to(self.device)
         peer_obs     = torch.stack([m.transition.obs    for m in peer_memories]).to(self.device)
         peer_actions = torch.stack([m.transition.action for m in peer_memories]).to(self.device)
-        logits, _    = self.ac(peer_obs)
-        return -(weights * Categorical(logits=logits).log_prob(peer_actions)).mean()
+        logits, _    = self.model(peer_obs)
+        return -(weights * Categorical(logits=logits).log_prob(peer_actions)).sum()
 
     def _compute_gae(
             self,
@@ -511,15 +540,18 @@ class PPOAgent:
                 next_val  = values[t + 1]
                 next_term = float(dones[t])
 
+            # GAE with correct truncation: next_val is bootstrapped, but gae is reset.
+            # Terminated (done and not truncated): no bootstrap, gae is reset.
             if truncateds[t]:
-                next_term = 0.0
-                gae       = 0.0
-
-            delta         = rewards[t] + self.gamma * next_val * (1.0 - next_term) - values[t]
-            gae           = delta + self.gamma * self.lam * (1.0 - next_term) * gae
+                delta = rewards[t] + self.gamma * next_val - values[t]
+                gae   = delta
+            else:
+                delta = rewards[t] + self.gamma * next_val * (1.0 - next_term) - values[t]
+                gae   = delta + self.gamma * self.lam * (1.0 - next_term) * gae
+            
             advantages[t] = gae
 
-        return advantages, advantages + values
+        return advantages, advantages + values[:n]
 
     def _push_to_mediator(self) -> None:
         self.mediator.batch_push(self.buffer.to_transitions(self.agent_id))

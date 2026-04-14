@@ -58,10 +58,13 @@ CoffeeShop/
 │   ├── env/                 
 │   ├── mediator/            
 │   └── trainer/             
-└── scripts/             # The Execution Layer: Entry Points
-    ├── train.py             # Main orchestration loop
-    ├── eval.py              # Cross-play and baseline benchmarking
-    └── playback.py          # Visual debugging and GIF rendering
+├── coffeeshop/          # The Execution Layer: Entry Points
+│   ├── train.py             # Main orchestration loop
+│   ├── eval.py              # Cross-play and baseline benchmarking
+│   └── playback.py          # Visual debugging and GIF rendering
+└── test/                # Unit and Integration Tests
+    ├── test_mediator_math.py # Verification of social trust bounds
+    └── test_envs_cli.py     # CLI entry point validation
 ```
 
 ---
@@ -82,10 +85,10 @@ CoffeeShop uses a clean, dot-notation CLI driven by `OmegaConf`. You can overrid
 
 ```bash
 # Train on the default environment (Overcooked Cramped Room)
-python scripts/train.py
+python coffeeshop/train.py
 
 # Train on Crafter with specific overrides
-python scripts/train.py env=crafter trainer.total_steps=5000000 trainer.device=cuda
+python coffeeshop/train.py env=crafter trainer.total_steps=5000000 trainer.device=cuda
 ```
 
 ### 2. Evaluating Checkpoints
@@ -93,7 +96,7 @@ The evaluation utility dynamically scales to handle N-agent environments.
 
 ```bash
 # Evaluate cross-play between two different checkpoints
-python scripts/eval.py --env overcooked --layout cramped_room \
+python coffeeshop/eval.py --env overcooked --layout cramped_room \
     --ckpt_a checkpoints/run_1/checkpoint_100k.pt \
     --ckpt_b checkpoints/run_2/checkpoint_100k.pt \
     --episodes 10
@@ -103,7 +106,7 @@ python scripts/eval.py --env overcooked --layout cramped_room \
 Generate `.gif` files to visually inspect policy behavior and coordination.
 
 ```bash
-python scripts/playback.py checkpoints/run_1/checkpoint_100k.pt \
+python coffeeshop/playback.py checkpoints/run_1/checkpoint_100k.pt \
     --env overcooked \
     --layout cramped_room \
     --output syngergy_demo.gif
@@ -117,4 +120,4 @@ python scripts/playback.py checkpoints/run_1/checkpoint_100k.pt \
 CoffeeShop can support any environment. Simply subclass `SocialEnvWrapper` in `envs/base.py` and implement the required abstract methods (`reset`, `step`, `get_global_obs`). Ensure that all observations, actions, and rewards use dictionaries keyed by `agent_id` (e.g., `{"agent_0": 1.5}`). Register your new wrapper in `utils/factory.py:make_env()`.
 
 ### Tracking New Metrics
-All system-wide metrics are tracked in `utils/metrics.py`. The orchestration loop in `scripts/train.py` automatically pulls these and broadcasts them to both TensorBoard and WandB simultaneously.
+All system-wide metrics are tracked in `utils/metrics.py`. The orchestration loop in `coffeeshop/train.py` automatically pulls these and broadcasts them to both TensorBoard and WandB simultaneously.

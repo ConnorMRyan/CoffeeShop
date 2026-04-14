@@ -40,7 +40,7 @@ def make_actors(runner: "VectorSocialRunner", mediator: CoffeeShopMediator, cfg:
     img_shape = (a_cfg.img_c, a_cfg.img_h, a_cfg.img_w) if a_cfg.encoder == "cnn" else None
     return {
         aid: SocialActor(
-            agent_id=aid, obs_dim=runner.obs_dim, action_dim=runner.action_dim,
+            agent_id=aid, obs_space=runner.obs_dim, act_space=runner.action_dim,
             global_obs_dim=runner.global_obs_dim, mediator=mediator,
             gamma=a_cfg.gamma, lam=a_cfg.lam, clip_eps=a_cfg.clip_eps,
             c_vf=a_cfg.c_vf, c_ent=a_cfg.c_ent, ppo_epochs=a_cfg.ppo_epochs,

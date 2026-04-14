@@ -69,7 +69,7 @@ CoffeeShop/
 │   └── overcooked/                   # Overcooked-AI
 │       ├── __init__.py
 │       └── wrapper.py
-├── scripts/                          # Execution scripts
+├── coffeeshop/                        # Execution scripts
 │   ├── evaluate.py
 │   └── train.py
 ├── utils/                            # Experiment tracking & tooling

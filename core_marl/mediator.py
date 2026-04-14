@@ -108,6 +108,7 @@ class CoffeeShopMediator:
         self.target_tau    = target_tau
         self.baseline_max_jump = baseline_max_jump
         self.device        = torch.device(device)
+        self.raw_reward_history: Dict[str, deque[float]] = defaultdict(lambda: deque(maxlen=10000))
 
         self.diversity_threshold = diversity_threshold
         self.timeout_duration    = timeout_duration
@@ -168,6 +169,35 @@ class CoffeeShopMediator:
         }
 
     # ------------------------------------------------------------------
+    # Step Logic — Reward Averaging
+    # ------------------------------------------------------------------
+
+    def step(self, rewards: Dict[str, float]) -> Dict[str, float]:
+        """
+        Capture and store exact environment rewards before calculating 
+        the averaged shared reward.
+        """
+        with self._lock:
+            if not rewards:
+                return {}
+            
+            self.raw_rewards = rewards.copy()
+
+            # Group by environment to calculate team-shared rewards
+            env_rewards = defaultdict(list)
+            for aid, r in rewards.items():
+                self.raw_reward_history[aid].append(r)
+                eid = self._agent_last_env.get(aid, 0)
+                env_rewards[eid].append(r)
+                
+            avg_rewards = {}
+            for aid, r in rewards.items():
+                eid = self._agent_last_env.get(aid, 0)
+                avg_rewards[aid] = float(np.mean(env_rewards[eid]))
+                
+            return avg_rewards
+
+    # ------------------------------------------------------------------
     # Gossip Logic — Performance Monitoring
     # ------------------------------------------------------------------
 
@@ -184,12 +214,9 @@ class CoffeeShopMediator:
             atb = self._atb_reward
 
         # Step function: gossip factor transitions from gossip_alpha to 1.0
-        # as current_avg approaches 0.7 * atb.
+        # as current_avg approaches the threshold (70% of all-time-best).
         threshold = 0.7 * atb
         if current_avg < threshold:
-            # If current_avg is much lower than threshold, factor is gossip_alpha.
-            # We can use a sigmoid or a simple linear interpolation for a "smooth step".
-            # For now, let's just make it a bit more continuous.
             return self._gossip_alpha
         
         return 1.0
@@ -209,7 +236,15 @@ class CoffeeShopMediator:
             self._value_history[transition.agent_id].append(transition.value_est)
             self._agent_last_env[transition.agent_id] = transition.env_id
 
-            total_r = transition.reward + transition.sparse_reward
+            # Use raw rewards for the critic to stop reward data leakage
+            # Pop from history if available, otherwise fallback to transition reward
+            history = self.raw_reward_history[transition.agent_id]
+            raw_r = history.popleft() if history else transition.reward
+            
+            from dataclasses import replace
+            t_raw = replace(transition, reward=raw_r)
+
+            total_r = t_raw.reward + t_raw.sparse_reward
             self._reward_window.append(total_r)
             self._env_reward_windows[transition.env_id].append(total_r)
 
@@ -220,11 +255,11 @@ class CoffeeShopMediator:
                 else:
                     self._atb_reward = max(self._atb_reward, current_global_avg)
 
-        td_error, social_bonus = self._compute_td_and_bonus(transition)
-        priority = self._compute_priority(td_error, social_bonus, transition)
+        td_error, social_bonus = self.evaluate_and_prioritize(t_raw)
+        priority = self._compute_priority(td_error, social_bonus, t_raw)
 
         with self._lock:
-            self._buffer.push(ScoredMemory(transition, td_error, social_bonus, priority))
+            self._buffer.push(ScoredMemory(t_raw, td_error, social_bonus, priority))
 
     def batch_push(self, transitions: List[Transition]) -> None:
         """
@@ -245,10 +280,20 @@ class CoffeeShopMediator:
             return
 
         with self._lock:
+            raw_transitions = []
+            from dataclasses import replace
             for t in transitions:
                 self._value_history[t.agent_id].append(t.value_est)
                 self._agent_last_env[t.agent_id] = t.env_id
-                total_r = t.reward + t.sparse_reward
+                
+                # Pop the oldest matching raw reward from history for this agent
+                history = self.raw_reward_history[t.agent_id]
+                raw_r = history.popleft() if history else t.reward
+                
+                t_raw = replace(t, reward=raw_r)
+                raw_transitions.append(t_raw)
+
+                total_r = t_raw.reward + t_raw.sparse_reward
                 self._reward_window.append(total_r)
                 self._env_reward_windows[t.env_id].append(total_r)
 
@@ -259,24 +304,24 @@ class CoffeeShopMediator:
                 else:
                     self._atb_reward = max(self._atb_reward, current_global_avg)
 
-        g_obs      = torch.stack([t.global_obs      for t in transitions]).to(self.device, non_blocking=True)
-        next_g_obs = torch.stack([t.next_global_obs for t in transitions]).to(self.device, non_blocking=True)
+        g_obs      = torch.stack([t.global_obs      for t in raw_transitions]).to(self.device, non_blocking=True)
+        next_g_obs = torch.stack([t.next_global_obs for t in raw_transitions]).to(self.device, non_blocking=True)
 
         with torch.no_grad():
             v_s_all    = self.critic(g_obs)
             v_next_all = self.critic(next_g_obs)
 
-        v_s_np = v_s_all.cpu().numpy()
-        v_next_np = v_next_all.cpu().numpy()
+        v_s_np = v_s_all.cpu().numpy().flatten()
+        v_next_np = v_next_all.cpu().numpy().flatten()
         
         new_memories = []
-        for i, t in enumerate(transitions):
+        for i, t in enumerate(raw_transitions):
             social_bonus = (
                 self._compute_synergy_bonus(t.agent_id, t.sparse_reward)
                 if t.sparse_reward > 0.0 else 0.0
             )
             v_s    = float(v_s_np[i])
-            v_next = 0.0 if t.done else float(v_next_np[i])
+            v_next = 0.0 if (t.done and not t.truncated) else float(v_next_np[i])
 
             effective_reward = t.reward + t.sparse_reward + social_bonus
             td_error = abs(effective_reward + self.gamma * v_next - v_s)
@@ -285,6 +330,45 @@ class CoffeeShopMediator:
 
         with self._lock:
             for sm in new_memories:
+                self._buffer.push(sm)
+
+    def evaluate_transitions(self, transitions: List[Transition]) -> torch.Tensor:
+        """
+        Evaluate a batch of transitions and return their TD errors.
+        Does NOT push to the buffer. Used for the meeting interval in train.py.
+        """
+        if not transitions:
+            return torch.empty(0, device=self.device)
+
+        g_obs      = torch.stack([t.global_obs      for t in transitions]).to(self.device, non_blocking=True)
+        next_g_obs = torch.stack([t.next_global_obs for t in transitions]).to(self.device, non_blocking=True)
+
+        with torch.no_grad():
+            v_s    = self.critic(g_obs)
+            v_next = self.critic(next_g_obs)
+
+        v_s_np = v_s.cpu().numpy().flatten()
+        v_next_np = v_next.cpu().numpy().flatten()
+        
+        td_errors = []
+        for i, t in enumerate(transitions):
+            social_bonus = (
+                self._compute_synergy_bonus(t.agent_id, t.sparse_reward)
+                if t.sparse_reward > 0.0 else 0.0
+            )
+            v_s_val    = float(v_s_np[i])
+            v_next_val = 0.0 if (t.done and not t.truncated) else float(v_next_np[i])
+
+            effective_reward = t.reward + t.sparse_reward + social_bonus
+            td_error = abs(effective_reward + self.gamma * v_next_val - v_s_val)
+            td_errors.append(td_error)
+
+        return torch.tensor(td_errors, dtype=torch.float32, device=self.device)
+
+    def push_scored_batch(self, scored_memories: List[ScoredMemory]) -> None:
+        """Push pre-scored memories directly to the buffer."""
+        with self._lock:
+            for sm in scored_memories:
                 self._buffer.push(sm)
 
     def broadcast(
@@ -385,7 +469,7 @@ class CoffeeShopMediator:
             dtype=torch.float32, device=self.device,
         )
         dones      = torch.tensor(
-            [sm.transition.done for sm in batch],
+            [float(sm.transition.done and not sm.transition.truncated) for sm in batch],
             dtype=torch.float32, device=self.device,
         )
 
@@ -415,13 +499,13 @@ class CoffeeShopMediator:
     # Core Logic — Social Bonus & TD-Error
     # ------------------------------------------------------------------
 
-    def _compute_td_and_bonus(self, t: Transition) -> Tuple[float, float]:
+    def evaluate_and_prioritize(self, t: Transition) -> Tuple[float, float]:
         """
         Compute (td_error, social_bonus) for a freshly pushed transition.
 
         The critic is called under no_grad so push() incurs no backward cost.
-        Early in training the critic is randomly initialized, so TD errors will
-        be noisy — they become meaningful as update_critic() trains the network.
+        Uses raw rewards (t.reward + t.sparse_reward) to maintain an accurate 
+        mapping of true environment returns.
         """
         social_bonus = 0.0
         if t.sparse_reward > 0.0:
@@ -430,11 +514,11 @@ class CoffeeShopMediator:
         with torch.no_grad():
             v_s    = self.critic(t.global_obs.unsqueeze(0).to(self.device)).item()
             v_next = (
-                0.0 if t.done
+                0.0 if (t.done and not t.truncated)
                 else self.critic(t.next_global_obs.unsqueeze(0).to(self.device)).item()
             )
 
-        effective_reward = t.reward + t.sparse_reward + social_bonus
+        effective_reward = t.reward + t.sparse_reward
         td_target        = effective_reward + self.gamma * v_next
         td_error         = abs(td_target - v_s)
 

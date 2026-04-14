@@ -8,7 +8,7 @@ import threading
 import torch
 
 if TYPE_CHECKING:
-    from core_marl.mediator import Transition
+    from core_marl.mediator import CoffeeShopMediator
 
 @dataclass
 class Transition:
@@ -27,7 +27,7 @@ class Transition:
     truncated:       bool = False
     timestamp:       float = field(default_factory=time.monotonic)
 
-@dataclass
+@dataclass(frozen=True)
 class ScoredMemory:
     """A Transition annotated with Mediator-computed priority."""
     transition:   Transition

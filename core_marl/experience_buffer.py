@@ -1,8 +1,13 @@
 from __future__ import annotations
-
+import heapq
+import threading
+import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from core_marl.memory import ScoredMemory
 
 
 @dataclass
@@ -73,3 +78,43 @@ class ExperienceBuffer:
             next_observations=next_obs_list,
             infos=infos_list,
         )
+
+
+class SharedExperienceBuffer:
+    """Buffer for multi-agent experience shared across the population.
+
+    Uses a priority-based system to keep the most valuable transitions.
+    """
+
+    def __init__(self, capacity: int) -> None:
+        self.capacity = capacity
+        self._storage: List[ScoredMemory] = []
+        self._lock = threading.Lock()
+
+    def add(self, memories: List[ScoredMemory]) -> None:
+        """Add a list of ScoredMemory objects to the buffer."""
+        with self._lock:
+            self._storage.extend(memories)
+            # Post-loop heap trim: keep only the top capacity elements by priority.
+            if len(self._storage) > self.capacity:
+                self._storage = heapq.nlargest(self.capacity, self._storage, key=lambda x: x.priority)
+
+    def sample_top(self, n: int, gamma_time: float = 0.99) -> List[ScoredMemory]:
+        """Compute priority decay transiently and return the top n."""
+        with self._lock:
+            if not self._storage:
+                return []
+
+            current_time = time.monotonic()
+            scored_list = []
+            for mem in self._storage:
+                dt = current_time - mem.transition.timestamp
+                decayed_priority = mem.priority * (gamma_time ** dt)
+                scored_list.append((decayed_priority, mem))
+
+            scored_list.sort(key=lambda x: x[0], reverse=True)
+            return [mem for _, mem in scored_list[:n]]
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._storage)
