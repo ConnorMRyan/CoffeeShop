@@ -67,6 +67,14 @@ CoffeeShop/
 
 ---
 
+## 📄 Research Context
+
+For a detailed analysis of how CoffeeShop relates to existing MARL literature
+(QMIX, MAPPO, IPPO, off-policy distillation), see
+[COFFEESHOP_NOVELTY_ANALYSIS.md](./COFFEESHOP_NOVELTY_ANALYSIS.md).
+
+---
+
 ## 🚀 Quick Start
 
 ### Installation
