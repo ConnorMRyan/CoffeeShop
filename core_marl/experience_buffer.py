@@ -1,63 +1,85 @@
 from __future__ import annotations
 
+import heapq
+from collections import deque
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Tuple
 
-
 @dataclass
 class ExperienceBatch:
-    """Container for a batch of multi-agent experience.
-
-    Each field is a list aligned by time steps; values are per-agent dicts.
-    """
-    observations: List[Dict[str, Any]]
-    actions: List[Dict[str, Any]]
-    rewards: List[Dict[str, float]]
-    terminated: List[Dict[str, bool]]
-    truncated: List[Dict[str, bool]]
-    next_observations: List[Dict[str, Any]]
+    """Container for a batch of multi-agent experience."""
+    observations: List[Dict[str, Any]] = field(default_factory=list)
+    actions: List[Dict[str, Any]] = field(default_factory=list)
+    rewards: List[Dict[str, float]] = field(default_factory=list)
+    terminated: List[Dict[str, bool]] = field(default_factory=list)
+    truncated: List[Dict[str, bool]] = field(default_factory=list)
+    next_observations: List[Dict[str, Any]] = field(default_factory=list)
     infos: List[Dict[str, Any]] = field(default_factory=list)
 
+@dataclass
+class PrioritizedMemory:
+    priority: float
+    timestamp: int
+    data: Tuple[Any, ...]
+    
+    def __lt__(self, other):
+        # We want a min-heap to efficiently discard lowest priorities during add
+        return self.priority < other.priority
 
-class ExperienceBuffer:
-    """Simple in-memory multi-agent experience buffer (rollout-style)."""
+class SharedExperienceBuffer:
+    """Centralized buffer that holds prioritized shared memories.
+    
+    Memories are prioritized by TD-error, and penalized by age (recency decay).
+    """
 
-    def __init__(self, capacity: int = 1_000) -> None:
+    def __init__(self, capacity: int = 10_000, gamma_time: float = 0.999) -> None:
         self.capacity = capacity
-        self._storage: List[Tuple[
-            Dict[str, Any], Dict[str, Any], Dict[str, float], Dict[str, bool], Dict[str, bool], Dict[str, Any]
-        ]] = []
+        # Using a heap to automatically sort by highest priority
+        self._storage: List[PrioritizedMemory] = []
+        self.gamma_time = gamma_time
 
-    def add(
-        self,
-        obs: Dict[str, Any],
-        actions: Dict[str, Any],
-        rewards: Dict[str, float],
-        terminated: Dict[str, bool],
-        truncated: Dict[str, bool],
-        next_obs: Dict[str, Any],
-        infos: Dict[str, Any] | None = None,
-    ) -> None:
-        if len(self._storage) >= self.capacity:
-            self._storage.pop(0)
-        self._storage.append((obs, actions, rewards, terminated, truncated, next_obs if next_obs is not None else {}, infos or {}))
+    def add(self, priorities: List[float], timestamp: int, batch: ExperienceBatch) -> None:
+        """Add a batch of experiences with pre-computed TD-error priorities."""
+        for t, priority in enumerate(priorities):
+            # Extract individual transition
+            transition = (
+                batch.observations[t],
+                batch.actions[t],
+                batch.rewards[t],
+                batch.terminated[t],
+                batch.truncated[t],
+                batch.next_observations[t],
+                batch.infos[t] if batch.infos else {}
+            )
+            item = PrioritizedMemory(priority, timestamp, transition)
+            
+            if len(self._storage) < self.capacity:
+                heapq.heappush(self._storage, item)
+            else:
+                # Use heappushpop to maintain capacity efficiently.
+                # Since index 0 is the smallest priority (min-heap),
+                # heappushpop will replace the smallest with the new one if new is larger,
+                # or keep the smallest and discard the new one if new is even smaller.
+                heapq.heappushpop(self._storage, item)
 
-    def clear(self) -> None:
-        self._storage.clear()
+    def sample_top(self, current_time: int, n: int = 32) -> ExperienceBatch:
+        """Sample the highest priority experiences, applying recency decay.
 
-    def __len__(self) -> int:  # noqa: D401
-        return len(self._storage)
+        Priorities are decayed transiently via a key function — stored
+        priorities are NEVER mutated, preventing compounding decay on
+        repeated calls.
+        """
+        def effective_priority(mem: PrioritizedMemory) -> float:
+            age = max(0, current_time - mem.timestamp)
+            return mem.priority * (self.gamma_time ** age)
 
-    def export(self) -> ExperienceBatch:
-        obs_list: List[Dict[str, Any]] = []
-        act_list: List[Dict[str, Any]] = []
-        rew_list: List[Dict[str, float]] = []
-        term_list: List[Dict[str, bool]] = []
-        trunc_list: List[Dict[str, bool]] = []
-        next_obs_list: List[Dict[str, Any]] = []
-        infos_list: List[Dict[str, Any]] = []
-
-        for obs, actions, rewards, terminated, truncated, next_obs, infos in self._storage:
+        top_n = heapq.nlargest(n, self._storage, key=effective_priority)
+        
+        obs_list, act_list, rew_list, term_list, trunc_list, next_obs_list, infos_list = [], [], [], [], [], [], []
+        
+        for mem in top_n:
+            obs, actions, rewards, terminated, truncated, next_obs, infos = mem.data
             obs_list.append(obs)
             act_list.append(actions)
             rew_list.append(rewards)
@@ -74,4 +96,42 @@ class ExperienceBuffer:
             truncated=trunc_list,
             next_observations=next_obs_list,
             infos=infos_list,
+        )
+
+    def __len__(self) -> int:
+        return len(self._storage)
+
+class ExperienceBuffer:
+    """Simple in-memory multi-agent experience buffer (for local rollout before sharing).
+
+    Uses collections.deque for O(1) append and automatic capacity eviction
+    instead of O(n) list.pop(0).
+    """
+    def __init__(self, capacity: int = 1_000) -> None:
+        self.capacity = capacity
+        self._storage: deque = deque(maxlen=capacity)
+
+    def add(self, obs, actions, rewards, terminated, truncated, next_obs, infos=None) -> None:
+        # deque with maxlen automatically evicts the oldest entry — no pop(0) needed
+        self._storage.append((obs, actions, rewards, terminated, truncated, next_obs or {}, infos or {}))
+
+    def clear(self) -> None:
+        self._storage.clear()
+
+    def __len__(self) -> int:
+        return len(self._storage)
+
+    def export(self) -> ExperienceBatch:
+        obs_list, act_list, rew_list, term_list, trunc_list, next_obs_list, infos_list = [], [], [], [], [], [], []
+        for obs, actions, rewards, terminated, truncated, next_obs, infos in self._storage:
+            obs_list.append(obs)
+            act_list.append(actions)
+            rew_list.append(rewards)
+            term_list.append(terminated)
+            trunc_list.append(truncated)
+            next_obs_list.append(next_obs)
+            infos_list.append(infos)
+        return ExperienceBatch(
+            observations=obs_list, actions=act_list, rewards=rew_list, terminated=term_list,
+            truncated=trunc_list, next_observations=next_obs_list, infos=infos_list,
         )

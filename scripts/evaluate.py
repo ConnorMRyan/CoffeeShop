@@ -11,8 +11,8 @@ from envs import SocialEnvWrapper
 def make_env(name: str, params: Dict[str, Any]) -> SocialEnvWrapper:
     name = name.lower()
     if name == "overcooked":
-        from envs.overcooked.wrapper import OvercookedWrapper
-        return OvercookedWrapper(**params)
+        from envs.overcooked.wrapper import OvercookedSocialWrapper
+        return OvercookedSocialWrapper(**params)
     if name == "crafter":
         from envs.crafter.wrapper import CrafterWrapper
         return CrafterWrapper(**params)

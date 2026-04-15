@@ -27,6 +27,7 @@ Data flows: Env → Mediator → SocialActors (for actions) → ExperienceBuffer
 - **Agent IDs**: Hardcoded in wrappers (e.g., `["agent_0", "agent_1"]` in Overcooked); consistent across components.
 - **Reward shaping**: Modify `Mediator.step()` for social rewards (e.g., averaging).
 - **Metrics**: Use `Metrics.update({"reward": sum(rewards.values())})`; log means periodically.
+- **Diversity Monitoring**: Population diversity is measured using Jensen-Shannon Divergence on a shared probe batch. Logged as `population_diversity`.
 - **Dependencies**: Core in `requirements.txt`; optional envs commented out; install PyTorch explicitly for CUDA/CPU.
 
 Reference: `core_marl/`, `envs/overcooked/wrapper.py`, `agents/ppo.py`, `configs/`.</content>

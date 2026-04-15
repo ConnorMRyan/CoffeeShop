@@ -48,5 +48,5 @@ class Checkpointer:
         f = str(Path(self.dirpath) / (filename or self.filename))
         if not os.path.exists(f):
             raise FileNotFoundError(f"Checkpoint not found: {f}")
-        data: Dict[str, Any] = torch.load(f, map_location="cpu")
+        data: Dict[str, Any] = torch.load(f, map_location="cpu", weights_only=True)
         return data

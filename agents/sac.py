@@ -3,6 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict
 
+import numpy as np
+import torch
+
 
 @dataclass
 class SACConfig:
@@ -27,7 +30,22 @@ class SACAgent:
 
     def act(self, obs: Dict[str, Any], deterministic: bool = False) -> Dict[str, Any]:
         """Return actions per agent_id. This stub returns no-ops."""
-        return {aid: None for aid in obs.keys()}
+        return {aid: {"action": 0, "val": 0.0, "logp": 0.0} for aid in obs.keys()}
+
+    def behavior_cloning_update(self, aid: str, obs_batch: torch.Tensor, act_batch: torch.Tensor, omega: Any) -> float:
+        """Stub for auxiliary distillation update."""
+        return 0.0
+
+    def get_action_dist(self, obs: Dict[str, Any]) -> Dict[str, Any]:
+        """Get the action distribution for the given observation.
+        
+        Returns a dict of action probabilities (numpy arrays) keyed by agent_id.
+        In this stub, we return a uniform distribution over dummy actions.
+        """
+        # Example: Assume 4 actions
+        num_actions = 4
+        dist = np.ones(num_actions) / num_actions
+        return {aid: dist for aid in obs.keys()}
 
     def update(self, batch: Dict[str, Any]) -> Dict[str, float]:
         """Perform a training update from a batch.
