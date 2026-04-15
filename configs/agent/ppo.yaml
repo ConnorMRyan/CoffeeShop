@@ -1,5 +1,6 @@
 # Default Agent Config (PPO)
 name: ppo
+seed: 42
 lr: 3e-4
 gamma: 0.99
 lam: 0.95

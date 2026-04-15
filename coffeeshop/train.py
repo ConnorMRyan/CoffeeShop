@@ -94,8 +94,9 @@ def load_config() -> Any:
     if not OmegaConf.select(cfg, "trainer.non_blocking"):
         cfg.trainer.non_blocking = (cfg.trainer.device != "cpu")
 
-    # 6. Apply Baseline suppression if flag is set
-    if args.baseline:
+    # 6. Apply Baseline suppression if flag is set or social_enabled is False
+    social_enabled = OmegaConf.select(cfg, "trainer.social_enabled", default=True)
+    if args.baseline or not social_enabled:
         cfg.agent.vanilla = True      # pure PPO: no BC loss, no mediator pushes
         cfg.trainer.baseline = True
         cfg.trainer.num_envs = 1      # single env — no cross-training value in vanilla PPO
@@ -109,10 +110,20 @@ def main() -> None:
 
 
     cfg = load_config()
+    log = get_logger()
+
+    import random, numpy as np, torch
+    seed = OmegaConf.select(cfg, "trainer.seed", default=42)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    log.info(f"Global seed set to {seed}")
+
     t_cfg, e_cfg, a_cfg, m_cfg = cfg.trainer, cfg.env, cfg.agent, cfg.mediator
 
-    torch.manual_seed(t_cfg.seed); np.random.seed(t_cfg.seed); log = get_logger()
-    run_id = t_cfg.run_id or time.strftime("%Y%m%d_%H%M%S")
+    run_id = OmegaConf.select(cfg, "trainer.run_name") or t_cfg.run_id or time.strftime("%Y%m%d_%H%M%S")
     checkpointer = Checkpointer(
         dirpath=os.path.abspath(t_cfg.checkpoint_dir),
         run_id=run_id,
