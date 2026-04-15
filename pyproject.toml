@@ -50,4 +50,21 @@ include = ["agents*", "core_marl*", "envs*", "utils*", "models*", "coffeeshop*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
-testpaths = ["test"]
+testpaths = ["tests"]
+addopts = "--cov=. --cov-report=term-missing --cov-fail-under=9"
+
+[tool.coverage.run]
+omit = [
+    "scripts/*",
+    "tests/*",
+    "parity_check.py",
+    "*/__init__.py"
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError"
+]

@@ -11,6 +11,7 @@ from core_marl.social_actor import SocialActor, SocialActorConfig
 from core_marl.experience_buffer import ExperienceBuffer, SharedExperienceBuffer
 import numpy as np
 import torch
+from einops import rearrange, reduce
 
 # Lazy imports to keep optional deps optional
 
@@ -129,15 +130,13 @@ def main() -> None:
             metrics.update({"mediator_critic_loss": critic_loss})
             
             if td_errors.numel() > 0:
-                # td_errors shape is [T * num_agents]. SharedExperienceBuffer.add
-                # needs exactly one priority per timestep, so reduce across agents
+                # Needs exactly one priority per timestep, so reduce across agents
                 # by taking the max TD-error per step.
                 num_agents = len(mediator.agent_ids)
                 if td_errors.numel() == len(batch_to_share.observations) * num_agents:
-                    per_step_td = td_errors.view(-1, num_agents).max(dim=1).values
+                    priorities = reduce(td_errors, '(t a) -> t', 'max', a=num_agents).detach().cpu().tolist()
                 else:
-                    per_step_td = td_errors  # already per-step
-                priorities = per_step_td.detach().cpu().tolist()
+                    priorities = td_errors.detach().cpu().tolist()  # already per-step
                 shared_buffer.add(priorities, timestamp=t, batch=batch_to_share)
                 
                 # Sample top M experiences to distill back to actors

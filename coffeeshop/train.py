@@ -12,6 +12,7 @@ from typing import Any, Dict
 import numpy as np
 import torch
 from omegaconf import OmegaConf
+from einops import rearrange
 
 from utils import get_logger, Metrics, TBWriter, WandbWriter
 from utils.checkpointing import Checkpointer
@@ -271,10 +272,13 @@ def main() -> None:
                     # 2. Batched evaluation of TD errors
                     td_errors = mediator.evaluate_transitions(flattened_trans) # [T * A]
                     
-                    # 3. Aggregate TD errors per timestep using .max(dim=1)
-                    # Reshape to (timesteps, actors)
-                    td_errors_reshaped = td_errors.view(num_timesteps, num_actors)
-                    agg_td_errors, best_agent_indices = td_errors_reshaped.max(dim=1)
+                    # 3. Aggregate TD errors per timestep using einops.reduce
+                    # Reshape to (timesteps, actors) and take max
+                    from einops import reduce
+                    agg_td_errors = reduce(td_errors, '(t a) -> t', 'max', a=num_actors)
+                    # We still need best_agent_indices for step 4
+                    td_errors_reshaped = rearrange(td_errors, '(t a) -> t a', a=num_actors)
+                    best_agent_indices = td_errors_reshaped.argmax(dim=1)
                     
                     # 4. Create batch_to_share with one transition per timestep (the "best" one)
                     batch_to_share = []
