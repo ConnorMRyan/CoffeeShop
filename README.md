@@ -62,7 +62,8 @@ CoffeeShop/
 │   └── playback.py          # Visual debugging and GIF rendering
 └── tests/               # Unit and Integration Tests
     ├── test_smoke.py        # 1k-step run-and-exit verification
-    └── test_mediator_math.py # Verification of social trust bounds
+    ├── test_mediator_math.py # Verification of social trust bounds
+    └── test_mediator_manual.py # Manual mediator integration tests
 ```
 
 ---
