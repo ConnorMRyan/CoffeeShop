@@ -1,0 +1,15 @@
+# CoffeeShop full social features — Overcooked cramped_room
+defaults:
+  - /env: overcooked
+  - /agent: ppo
+  - /mediator: default
+  - /trainer: default
+
+env:
+  layout: cramped_room
+
+trainer:
+  seed: 42
+  total_steps: 2_000_000
+  run_name: "CoffeeShop_Overcooked_Cramped"
+  social_enabled: true

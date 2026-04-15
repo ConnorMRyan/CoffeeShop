@@ -1,0 +1,12 @@
+# Vanilla PPO baseline on Crafter — no social features
+# Reproduces the VanillaCrafter checkpoint run
+defaults:
+  - /env: crafter
+  - /agent: ppo
+  - /trainer: default
+
+trainer:
+  seed: 0
+  total_steps: 1_000_000
+  run_name: "VanillaCrafter"
+  social_enabled: false

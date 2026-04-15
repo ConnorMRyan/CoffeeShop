@@ -1,0 +1,13 @@
+# CoffeeShop full social features — Crafter
+# Compare against baseline_vanilla_ppo_crafter with same seed
+defaults:
+  - /env: crafter
+  - /agent: ppo
+  - /mediator: default
+  - /trainer: default
+
+trainer:
+  seed: 0
+  total_steps: 1_000_000
+  run_name: "CoffeeShop_Crafter"
+  social_enabled: true
