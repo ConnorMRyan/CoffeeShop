@@ -34,7 +34,7 @@ The CoffeeShop architecture separates the RL logic from the communication layer,
 CoffeeShop/
 ├── core_marl/           # The Brain: Communication and Experience Sharing
 │   ├── mediator.py          # Centralized critic and broadcasting logic
-│   ├── experience_buffer.py # Prioritized replay buffer for social memories
+│   ├── memory.py            # Prioritized replay buffer for social memories
 │   └── social_actor.py      # Bindings between global IDs and local policies
 ├── agents/              # The Local Policies: RL Algorithms
 │   ├── ppo.py               # Flagship PPO with auxiliary BC loss and learned openness (ω)
@@ -56,11 +56,11 @@ CoffeeShop/
 │   ├── env/                 
 │   ├── mediator/            
 │   └── trainer/             
-├── coffeeshop/          # The Execution Layer: Entry Points
+├── coffeeshop/          # Execution layer: train, eval, playback entry points.
 │   ├── train.py             # Main orchestration loop
 │   ├── eval.py              # Cross-play and baseline benchmarking
 │   └── playback.py          # Visual debugging and GIF rendering
-└── test/                # Unit and Integration Tests
+└── tests/               # Unit and Integration Tests
     ├── test_smoke.py        # 1k-step run-and-exit verification
     └── test_mediator_math.py # Verification of social trust bounds
 ```

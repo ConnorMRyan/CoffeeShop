@@ -40,7 +40,6 @@ all = [
 
 [project.scripts]
 coffeeshop-train = "coffeeshop.train:main"
-coffeeshop-evaluate = "coffeeshop.evaluate:evaluate"
 coffeeshop-eval = "coffeeshop.eval:main"
 coffeeshop-playback = "coffeeshop.playback:main"
 
@@ -50,4 +49,4 @@ include = ["agents*", "core_marl*", "envs*", "utils*", "models*", "coffeeshop*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
-testpaths = ["test"]
+testpaths = ["tests"]

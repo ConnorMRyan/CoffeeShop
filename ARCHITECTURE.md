@@ -31,7 +31,7 @@ The repository is built around the concept of **Social Agency and Selective Inte
 
 This architecture is designed to solve the bottlenecks of high-variance, combinatorially complex, and procedurally generated domains. The repository abstracts the environment layer to benchmark the CoffeeShop model cleanly against standard baselines across both recognized academic standards and custom complex environments.
 
-* **AIsaac:** A custom procedurally generated environment training an agent to navigate the combinatorial item synergies and brutal mechanics of *The Binding of Isaac*.
+* **AIsaac:** A custom procedurally generated environment training an agent to navigate the combinatorial item synergies and brutal mechanics of *The Binding of Isaac*. **Status: Stub.** The current implementation provides a `SocialEnvWrapper` stub to document the target API contract, requiring the standalone `aisaac-env` package for full integration.
 * **Crafter:** DeepMind's 2D open-world survival benchmark testing long, sparse-reward tech trees.
 * **NLE (NetHack Learning Environment):** A highly stochastic roguelike domain serving as a standardized RL benchmark.
 * **Overcooked-AI:** A classic MARL benchmark for multi-agent coordination and strategy adaptation.
@@ -45,8 +45,7 @@ This architecture is designed to solve the bottlenecks of high-variance, combina
 CoffeeShop/
 ├── core_marl/           # The Brain: Communication and Experience Sharing
 │   ├── mediator.py          # Centralized critic and broadcasting logic
-│   ├── experience_buffer.py # Prioritized replay buffer for social memories
-│   ├── memory.py            # Transition and ScoredMemory definitions
+│   ├── memory.py            # Transition, ScoredMemory, and PrioritizedBuffer
 │   └── social_actor.py      # Bindings between global IDs and local policies
 ├── agents/              # The Local Policies: RL Algorithms
 │   ├── ppo.py               # Flagship PPO with auxiliary BC loss and learned openness (ω)
@@ -73,7 +72,7 @@ CoffeeShop/
 │   ├── train.py             # Main orchestration loop
 │   ├── eval.py              # Cross-play and baseline benchmarking
 │   └── playback.py          # Visual debugging and GIF rendering
-└── test/                # Unit and Integration Tests
+└── tests/               # Unit and Integration Tests
     ├── test_smoke.py        # 1k-step run-and-exit verification
     └── test_mediator_math.py # Verification of social trust bounds
 ```
