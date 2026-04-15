@@ -5,7 +5,7 @@ import torch
 
 from core_marl import CoffeeShopMediator
 from agents.ppo import PPOAgent as PPOActor
-from envs.overcooked.wrapper import OvercookedSocialWrapper
+from envs.aisaac.wrapper import AIsaacWrapper
 
 
 def test_stub_training_loop_runs_200_steps():
@@ -14,7 +14,7 @@ def test_stub_training_loop_runs_200_steps():
     torch.manual_seed(0)
 
     # --- Build stub env ---
-    env = OvercookedSocialWrapper(layout_name="cramped_room")
+    env = AIsaacWrapper(num_agents=2, use_stub=True)
 
     # --- Build mediator ---
     mediator = CoffeeShopMediator(
@@ -29,8 +29,8 @@ def test_stub_training_loop_runs_200_steps():
     actors = {
         aid: PPOActor(
             agent_id=aid,
-            obs_dim=env.obs_dim,
-            action_dim=env.action_dim,
+            obs_space=env.obs_dim,
+            act_space=env.action_dim,
             global_obs_dim=env.global_obs_dim,
             mediator=mediator,
             gamma=0.99,
@@ -61,22 +61,25 @@ def test_stub_training_loop_runs_200_steps():
         # Actions per actor
         actions = {}
         for aid, actor in actors.items():
-            action = actor.ac.act(obs_dict[aid])[0]
-            actions[aid] = int(action.item())
+            # env_id=0 for simple stub
+            action = actor.act(0, obs_dict[aid], global_obs)
+            actions[aid] = action
 
         # Env step
         next_obs, rewards, terminated, truncated, infos = env.step(actions)
         sparse_rewards = infos.get("sparse_rewards", {aid: 0.0 for aid in env.agent_ids})
+        next_global_obs = env.get_global_obs(next_obs)
 
         # Actor steps (store transitions and occasional push)
         for aid, actor in actors.items():
-            done = terminated.get(aid, False) or truncated.get(aid, False)
-            actor.step(
-                obs=obs_dict[aid],
-                global_obs=global_obs,
+            done = terminated.get(aid, False)
+            trunc = truncated.get(aid, False)
+            actor.observe_outcome(
+                next_global_obs=next_global_obs,
                 reward=rewards[aid],
                 sparse_reward=sparse_rewards[aid],
                 done=done,
+                truncated=trunc,
             )
 
         obs_dict = next_obs
@@ -95,10 +98,8 @@ def test_stub_training_loop_runs_200_steps():
 
         # Occasionally update mediator critic from recent transitions
         if (t + 1) % 64 == 0:
-            recent = []
-            # Pull last up-to-64 pushed transitions across buffer
-            for sm in list(mediator._buffer)[-64:]:
-                recent.append(sm.transition)
+            # Pull last up-to-64 pushed ScoredMemory entries across buffer
+            recent = list(mediator._buffer)[-64:]
             mediator.update_critic(recent)
 
     # --- Assertions ---

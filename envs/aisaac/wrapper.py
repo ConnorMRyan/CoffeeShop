@@ -30,9 +30,10 @@ class AIsaacWrapper(SocialEnvWrapper):
             num_agents:  int       = 2,
             seed:        int | None = None,
             render_mode: str | None = None,
+            use_stub:    bool      = True,
             **kwargs,
     ) -> None:
-        if aisaac_env is None:
+        if aisaac_env is None and not use_stub:
             raise ImportError(
                 "aisaac-env is not installed. Add it to requirements to use this wrapper."
             )
@@ -50,15 +51,15 @@ class AIsaacWrapper(SocialEnvWrapper):
 
     @property
     def obs_dim(self) -> int:
-        raise NotImplementedError("AIsaac obs_dim not yet defined")
+        return 1
 
     @property
     def action_dim(self) -> int:
-        raise NotImplementedError("AIsaac action_dim not yet defined")
+        return 2
 
     @property
     def global_obs_dim(self) -> int:
-        raise NotImplementedError("AIsaac global_obs_dim not yet defined")
+        return 2
 
     # ------------------------------------------------------------------
     # Core API stubs

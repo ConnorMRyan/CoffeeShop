@@ -1,10 +1,6 @@
-Here is a comprehensive, professional `README.md` drafted to reflect the enterprise-grade architecture and robust refactoring we just completed for the CoffeeShop framework.
-
-***
-
 # ☕ CoffeeShop: Asynchronous Social Experience Sharing for MARL
 
-CoffeeShop is a highly modular, enterprise-grade Multi-Agent Reinforcement Learning (MARL) framework. It introduces the concept of **Asynchronous Social Experience Sharing**, allowing independently acting, decentralized agents to securely share transition data through a centralized, off-policy Mediator.
+CoffeeShop is a highly modular, Multi-Agent Reinforcement Learning (MARL) framework. It introduces the concept of **Asynchronous Social Experience Sharing**, allowing independently acting, decentralized agents to securely share transition data through a centralized, off-policy Mediator.
 
 Designed for robust research and rapid experimentation, CoffeeShop abstracts away boilerplate infrastructure, featuring strict environment contracts, hierarchical YAML configuration, and unified telemetry.
 
@@ -47,7 +43,9 @@ CoffeeShop/
 │   ├── base.py              # SocialEnvWrapper (Abstract Base Class)
 │   ├── overcooked/          # 2D Cooperative Gridworld
 │   ├── crafter/             # Open-world Survival
-│   └── aisaac/              # Complex reinforcement learning swarm
+│   ├── nethack/             # Roguelike benchmark
+│   ├── meltingpot/          # Cooperative social dilemmas
+│   └── aisaac/              # Complex reinforcement learning swarm (custom)
 ├── utils/               # The Infrastructure: Factories and Telemetry
 │   ├── factory.py           # Centralized instantiation (make_env, make_actors)
 │   ├── evaluation.py        # N-agent dynamic evaluation loops
@@ -63,8 +61,8 @@ CoffeeShop/
 │   ├── eval.py              # Cross-play and baseline benchmarking
 │   └── playback.py          # Visual debugging and GIF rendering
 └── test/                # Unit and Integration Tests
-    ├── test_mediator_math.py # Verification of social trust bounds
-    └── test_envs_cli.py     # CLI entry point validation
+    ├── test_smoke.py        # 1k-step run-and-exit verification
+    └── test_mediator_math.py # Verification of social trust bounds
 ```
 
 ---
