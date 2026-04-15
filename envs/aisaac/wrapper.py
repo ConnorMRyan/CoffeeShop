@@ -1,4 +1,23 @@
 from __future__ import annotations
+
+"""
+AIsaac Environment Wrapper for CoffeeShop.
+
+1. Dependency: Requires the `aisaac-env` package. Install via `pip install aisaac-env`.
+2. Requirement: This is a standalone Python package; it does not require a running game instance or ROMs.
+3. Constraints: Linux and macOS are supported. Licensed under MIT.
+4. Spaces:
+   - Observation space: Discrete/Box (stub currently returns size 1 tensors).
+   - Action space: Discrete (stub defines size 2).
+5. Usage:
+   ```python
+   from envs.aisaac.wrapper import AIsaacWrapper
+   env = AIsaacWrapper(num_agents=2, use_stub=True)
+   obs, info = env.reset()
+   actions = {"agent_0": 0, "agent_1": 1}
+   obs, rewards, terminated, truncated, info = env.step(actions)
+   ```
+"""
 from typing import Any, Dict, List, Tuple
 
 import torch
