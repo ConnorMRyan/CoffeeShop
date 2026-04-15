@@ -32,7 +32,7 @@ class Metrics:
         self.history.clear()
 
 
-def measure_population_diversity(actors: Dict[str, SocialActor], mediator: CoffeeShopMediator, device: str, batch_size: int = 64) -> float:
+def compute_population_diversity(actors: Dict[str, SocialActor], mediator: CoffeeShopMediator, device: str, batch_size: int = 64) -> float:
     """
     Computes Jensen-Shannon (JS) Divergence between all agents in the population
     using a shared probe batch sampled from the mediator's buffer.

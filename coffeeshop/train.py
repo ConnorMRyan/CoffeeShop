@@ -16,7 +16,7 @@ from omegaconf import OmegaConf
 from utils import get_logger, Metrics, TBWriter, WandbWriter
 from utils.checkpointing import Checkpointer
 from utils.factory import make_env, _env_idx, make_actors, VectorSocialRunner
-from utils.metrics import measure_population_diversity
+from utils.metrics import compute_population_diversity
 from core_marl.mediator import CoffeeShopMediator
 from core_marl.memory import ScoredMemory
 from agents.ppo import PPOAgent as SocialActor
@@ -347,7 +347,7 @@ def main() -> None:
 
             # --- Population Diversity Logging (social runs only) ---
             if not is_vanilla:
-                div = measure_population_diversity(actors, mediator, t_cfg.device)
+                div = compute_population_diversity(actors, mediator, t_cfg.device)
                 log.info(f"[STEP {step}] Population | Diversity (JS): {div:.4f}")
                 tb.add_scalar("population/diversity", div, step)
                 wb.log({"population/diversity": div}, step)
