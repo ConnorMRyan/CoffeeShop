@@ -35,48 +35,51 @@ This architecture is designed to solve the bottlenecks of high-variance, combina
 * **Crafter:** DeepMind's 2D open-world survival benchmark testing long, sparse-reward tech trees.
 * **NLE (NetHack Learning Environment):** A highly stochastic roguelike domain serving as a standardized RL benchmark.
 * **Overcooked-AI:** A classic MARL benchmark for multi-agent coordination and strategy adaptation.
+* **Melting Pot:** A suite of social dilemma environments for evaluating cooperative behavior in complex societies.
 
 ---
 
-## Repository Structure
+## Repository Structure (Canonical)
 
 ```text
 CoffeeShop/
-├── agents/                           # Standard baselines (for ablation studies)
-│   ├── __init__.py
-│   ├── ppo.py
-│   └── sac.py
-├── configs/                          # YAML configuration management
-│   ├── agent_config.yaml
-│   ├── env_config.yaml
-│   └── run_config.yaml
-├── core_marl/                        # Novel CoffeeShop architecture
-│   ├── __init__.py
-│   ├── experience_buffer.py          # Centralized prioritized replay
-│   ├── mediator.py                   # Off-policy TD-error evaluation
-│   └── social_actor.py               # PPO Actor with learned openness (\omega)
-├── envs/                             # Environment agnosticism layer
-│   ├── __init__.py
-│   ├── aisaac/                       # The Binding of Isaac integration
-│   │   ├── __init__.py
-│   │   └── wrapper.py
-│   ├── crafter/                      # Crafter benchmark
-│   │   ├── __init__.py
-│   │   └── wrapper.py
-│   ├── nethack/                      # NetHack Learning Environment
-│   │   ├── __init__.py
-│   │   └── wrapper.py
-│   └── overcooked/                   # Overcooked-AI
-│       ├── __init__.py
-│       └── wrapper.py
-├── scripts/                          # Execution scripts
-│   ├── evaluate.py
-│   └── train.py
-├── utils/                            # Experiment tracking & tooling
-│   ├── __init__.py
-│   ├── checkpointing.py
-│   ├── logging.py
-│   └── metrics.py
-├── .gitignore                        
-├── README.md                         
-└── requirements.txt
+├── core_marl/           # The Brain: Communication and Experience Sharing
+│   ├── mediator.py          # Centralized critic and broadcasting logic
+│   ├── experience_buffer.py # Prioritized replay buffer for social memories
+│   ├── memory.py            # Transition and ScoredMemory definitions
+│   └── social_actor.py      # Bindings between global IDs and local policies
+├── agents/              # The Local Policies: RL Algorithms
+│   ├── ppo.py               # Flagship PPO with auxiliary BC loss and learned openness (ω)
+│   └── sac.py               # Continuous control off-policy baseline
+├── envs/                # The Domains: Strict API Contracts
+│   ├── base.py              # SocialEnvWrapper (Abstract Base Class)
+│   ├── overcooked/          # 2D Cooperative Gridworld
+│   ├── crafter/             # Open-world Survival
+│   ├── nethack/             # Roguelike benchmark
+│   ├── meltingpot/          # Cooperative social dilemmas
+│   └── aisaac/              # Complex reinforcement learning swarm (custom)
+├── utils/               # The Infrastructure: Factories and Telemetry
+│   ├── factory.py           # Centralized instantiation (make_env, make_actors)
+│   ├── evaluation.py        # N-agent dynamic evaluation loops
+│   ├── metrics.py           # System-wide calculations (e.g., JS Divergence)
+│   ├── checkpointing.py     # Robust state-dict loading and saving
+│   └── logging.py           # Flexible logger configuration
+├── configs/             # Hierarchical State Management: OmegaConf YAMLs
+│   ├── agent/               
+│   ├── env/                 
+│   ├── mediator/            
+│   └── trainer/             
+├── coffeeshop/          # The Execution Layer: Entry Points
+│   ├── train.py             # Main orchestration loop
+│   ├── eval.py              # Cross-play and baseline benchmarking
+│   └── playback.py          # Visual debugging and GIF rendering
+└── test/                # Unit and Integration Tests
+    ├── test_smoke.py        # 1k-step run-and-exit verification
+    └── test_mediator_math.py # Verification of social trust bounds
+```
+
+---
+
+## Getting Started
+
+Refer to `README.md` for installation and training instructions.

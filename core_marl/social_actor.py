@@ -7,7 +7,7 @@ import torch
 
 @dataclass
 class SocialActorConfig:
-    """Configuration for a SocialActor."""
+    """Configuration for a PPOActor."""
     id: str
     omega_init: float = 0.1
     omega_learnable: bool = False

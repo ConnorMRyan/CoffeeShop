@@ -1,0 +1,15 @@
+# Mediator Config
+buffer_capacity: 10000
+gamma: 0.99
+epsilon_td: 0.05
+synergy_alpha: 0.3
+critic_lr: 5e-4
+critic_hidden: 1024
+tau: 5.0
+tau_min: 0.5
+baseline_max_jump: 2.0
+target_tau: 0.005   # Polyak coefficient for critic target network soft-update
+encoder: mlp
+img_c: 3
+img_h: 64
+img_w: 64
