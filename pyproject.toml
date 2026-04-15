@@ -50,3 +50,10 @@ include = ["agents*", "core_marl*", "envs*", "utils*", "models*", "coffeeshop*"]
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+select = ["E", "F", "I"]
+ignore = ["E501", "F841"]
+exclude = ["__pycache__", ".venv", "build", "data"]
