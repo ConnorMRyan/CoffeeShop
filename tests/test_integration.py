@@ -1,5 +1,8 @@
 # Run after: pip install -e .[test]
 # Tests import cleanly because the package is installed in editable mode.
+import pytest
+pytest.importorskip("overcooked_ai_py")
+
 import torch
 import numpy as np
 

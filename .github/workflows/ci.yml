@@ -29,7 +29,7 @@ jobs:
 
       - name: Install dependencies
         # Uses the uv.lock file to ensure exact reproducibility in CI
-        run: uv sync --locked
+        run: uv sync --all-extras --locked
 
       - name: Run tests (Pytest & Hypothesis)
         run: uv run pytest tests/
