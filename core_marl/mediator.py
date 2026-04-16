@@ -13,7 +13,7 @@ from core_marl.experience_buffer import ExperienceBatch
 
 @dataclass
 class MediatorConfig:
-    """Configuration for the CoffeeShop Mediator."""
+    """Configuration for the CoffeeShop CoffeeShopMediator."""
     shared_reward: bool = True
     hidden_size: int = 64
     gamma: float = 0.99
@@ -35,7 +35,7 @@ class CentralCriticNetwork(nn.Module):
         return self.net(obs)
 
 
-class Mediator:
+class CoffeeShopMediator:
     """Coordinates multi-agent interaction between env and agents.
 
     Now includes a centralized off-policy critic that evaluates shared

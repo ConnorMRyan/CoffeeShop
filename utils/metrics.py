@@ -10,7 +10,7 @@ import numpy as np
 
 if TYPE_CHECKING:
     from agents.ppo import PPOAgent as SocialActor
-    from core_marl.mediator import Mediator as CoffeeShopMediator
+    from core_marl.mediator import CoffeeShopMediator as CoffeeShopMediator
 
 @dataclass
 class Metrics:

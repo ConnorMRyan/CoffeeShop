@@ -4,7 +4,7 @@ import argparse
 from typing import Any, Dict
 
 from utils import get_logger
-from core_marl import Mediator
+from core_marl import CoffeeShopMediator
 from envs import SocialEnvWrapper
 
 
@@ -35,7 +35,7 @@ def main() -> None:
     log = get_logger("CoffeeShop.Eval")
 
     env = make_env(args.env, {"layout_name": args.layout} if args.env == "overcooked" else {})
-    mediator = Mediator(env)
+    mediator = CoffeeShopMediator(env)
 
     for ep in range(args.episodes):
         obs, infos = mediator.reset()

@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 
 from utils import get_logger, Metrics
 from utils.diversity import calculate_population_diversity
-from core_marl import Mediator, SocialActor, SocialActorConfig, ExperienceBuffer, SharedExperienceBuffer
+from core_marl import CoffeeShopMediator, SocialActor, SocialActorConfig, ExperienceBuffer, SharedExperienceBuffer
 from envs import SocialEnvWrapper
 import numpy as np
 import torch
@@ -108,7 +108,7 @@ def main(cfg: DictConfig) -> None:
         env_params["layout_name"] = cfg.env.layout_name
         
     env = make_env(cfg.env.name, env_params, seed=env_seed)
-    mediator = Mediator(env)
+    mediator = CoffeeShopMediator(env)
 
     # 2. Build base agent
     # We pass distributed=True to wrap the internal model in DDP
@@ -175,7 +175,7 @@ def main(cfg: DictConfig) -> None:
             batch_to_share = local_buffer.export()
             local_buffer.clear()
             
-            # Mediator evaluates TD-error
+            # CoffeeShopMediator evaluates TD-error
             td_errors, critic_loss = mediator.evaluate_and_prioritize(batch_to_share)
             metrics.update({"mediator_critic_loss": critic_loss})
             

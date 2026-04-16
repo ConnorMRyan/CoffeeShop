@@ -3,7 +3,7 @@
 import torch
 import numpy as np
 
-from core_marl.mediator import Mediator
+from core_marl import CoffeeShopMediator
 from core_marl.social_actor import SocialActor, SocialActorConfig
 from agents.ppo import PPOAgent
 from envs.overcooked.wrapper import OvercookedSocialWrapper
@@ -11,7 +11,7 @@ from envs.overcooked.wrapper import OvercookedSocialWrapper
 def test_full_pipeline_gradient_flow():
     # 1. Setup
     env = OvercookedSocialWrapper(layout_name="cramped_room")
-    mediator = Mediator(env)
+    mediator = CoffeeShopMediator(env)
     agent = PPOAgent(env.obs_space, env.act_space)
     actors = {aid: SocialActor(agent, SocialActorConfig(id=aid, omega_init=0.5, omega_learnable=True)) 
               for aid in mediator.agent_ids}

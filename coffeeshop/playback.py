@@ -78,7 +78,7 @@ def record_peak_performance(
     # Use the layout from meta if not overridden by the caller.
     effective_layout = ckpt_layout if layout_name == "cramped_room" and ckpt_layout else layout_name
 
-    # ── 2. Environment & Mediator ─────────────────────────────────────────
+    # ── 2. Environment & CoffeeShopMediator ─────────────────────────────────────────
     env = OvercookedSocialWrapper(layout_name=effective_layout, horizon=horizon)
     mediator = CoffeeShopMediator(global_obs_dim=env.global_obs_dim, device=device)
 

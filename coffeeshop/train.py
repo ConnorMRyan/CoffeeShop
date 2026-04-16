@@ -21,7 +21,7 @@ from utils import get_logger, Metrics, TBWriter, WandbWriter
 from utils.checkpointing import Checkpointer
 from utils.factory import make_env, _env_idx, make_actors, VectorSocialRunner
 from utils.metrics import measure_population_diversity
-from core_marl import Mediator
+from core_marl import CoffeeShopMediator
 from core_marl.memory import ScoredMemory
 from agents.ppo import PPOAgent as SocialActor
 from envs import SocialEnvWrapper
@@ -92,7 +92,7 @@ def main(cfg: DictConfig) -> None:
     runner = VectorSocialRunner(make_env, t_cfg.num_envs, e_cfg.name, e_cfg.params, "human" if t_cfg.render else None)
     
     img_shape = ((m_cfg.img_c, m_cfg.img_h, m_cfg.img_w) if m_cfg.encoder == "cnn" else None)
-    mediator = Mediator(
+    mediator = CoffeeShopMediator(
         global_obs_dim=runner.global_obs_dim,
         buffer_capacity=m_cfg.buffer_capacity,
         gamma=m_cfg.gamma,

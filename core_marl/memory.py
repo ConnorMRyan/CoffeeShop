@@ -29,7 +29,7 @@ class Transition:
 
 @dataclass(frozen=True)
 class ScoredMemory:
-    """A Transition annotated with Mediator-computed priority."""
+    """A Transition annotated with CoffeeShopMediator-computed priority."""
     transition:   Transition
     td_error:     float
     social_bonus: float                    # extra reward credited from peer synergy

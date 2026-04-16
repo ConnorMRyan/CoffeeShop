@@ -42,7 +42,7 @@ Sparse reward
 -------------
 NLE's reward is the per-step score delta — naturally sparse (mostly 0,
 positive on kills, item discoveries, etc.).  We surface it as both the
-dense reward and the sparse_reward in infos so the Mediator can treat
+dense reward and the sparse_reward in infos so the CoffeeShopMediator can treat
 score events as high-priority memories.
 """
 
@@ -240,7 +240,7 @@ class NLESocialWrapper(SocialEnvWrapper):
         # ── Reward decomposition ───────────────────────────────────────────
         # NLE's reward is the score delta per step — naturally sparse.
         # We expose it as both dense reward and sparse_reward so the
-        # Mediator treats positive score events as high-priority memories.
+        # CoffeeShopMediator treats positive score events as high-priority memories.
         sparse_reward = max(0.0, reward_f)   # only positive score events
 
         step_infos = {

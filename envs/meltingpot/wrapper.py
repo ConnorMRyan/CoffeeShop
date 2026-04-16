@@ -26,7 +26,7 @@ object with fields: `step_type`, `observation`, `reward`, `discount`.
   policy observation. Preference order: 'RGB', then first ndarray found.
 - `reward` is per-player (list/array). We return dense rewards per agent, and
   also expose a `sparse_rewards` dict that keeps only the positive component
-  (>=0) to act as a sparse signal for the Mediator.
+  (>=0) to act as a sparse signal for the CoffeeShopMediator.
 - Episode termination is signalled when `step_type` is LAST. We do not have a
   reliable way to distinguish true-terminal vs. timeout here, so we report
   `terminated=True` and `truncated=False` for LAST steps.
