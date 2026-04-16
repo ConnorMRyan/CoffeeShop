@@ -1,0 +1,19 @@
+version: 2
+updates:
+  # 1. Maintain Python dependencies (pyproject.toml & uv.lock)
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "python"
+
+  # 2. Maintain GitHub Actions (ci.yml)
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "actions"
