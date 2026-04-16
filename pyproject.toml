@@ -29,7 +29,7 @@ dependencies = [
 
 [project.optional-dependencies]
 overcooked = ["overcooked-ai>=1.1.0", "pygame>=2.5.0"]
-crafter = ["crafter>=1.8.0"]
+crafter = ["crafter>=1.8.3"]
 nethack = ["nle==0.9.1"]
 test = ["pytest", "pytest-cov"]
 dev = ["pytest", "pytest-cov", "bandit", "flake8"]
