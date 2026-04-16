@@ -36,24 +36,36 @@ def _env_idx(agent_id: str) -> int:
 
 def make_actors(runner: "VectorSocialRunner", mediator: CoffeeShopMediator, cfg: DictConfig, distributed: bool = False) -> Dict[str, SocialActor]:
     """Factory to create SocialActor (PPOAgent) instances."""
-    from agents.ppo import PPOAgent as SocialActor
+    from agents.ppo import PPOAgent as SocialActor, PPOConfig
     from torch.nn.parallel import DistributedDataParallel as DDP
     a_cfg = cfg.agent
-    img_shape = (a_cfg.img_c, a_cfg.img_h, a_cfg.img_w) if a_cfg.encoder == "cnn" else None
+    
+    # Map Hydra config to PPOConfig dataclass
+    ppo_config = PPOConfig(
+        gamma=a_cfg.gamma,
+        lam=a_cfg.lam,
+        clip_eps=a_cfg.clip_eps,
+        c_vf=a_cfg.c_vf,
+        c_ent=a_cfg.c_ent,
+        ppo_epochs=a_cfg.ppo_epochs,
+        mini_batch_size=a_cfg.mini_batch_size,
+        lr=a_cfg.lr,
+        hidden_size=a_cfg.hidden,
+        device=cfg.trainer.device
+    )
     
     actors = {}
     for aid in runner.agent_ids:
+        # PPOAgent now takes (obs_space, act_space, config)
+        # Assuming runner.obs_dim and runner.action_dim are compatible with obs_space/act_space
         actor = SocialActor(
-            agent_id=aid, obs_space=runner.obs_dim, act_space=runner.action_dim,
-            global_obs_dim=runner.global_obs_dim, mediator=mediator,
-            gamma=a_cfg.gamma, lam=a_cfg.lam, clip_eps=a_cfg.clip_eps,
-            c_vf=a_cfg.c_vf, c_ent=a_cfg.c_ent, ppo_epochs=a_cfg.ppo_epochs,
-            mini_batch_size=a_cfg.mini_batch_size, lr=a_cfg.lr, push_every=cfg.trainer.push_every,
-            hidden=a_cfg.hidden, encoder=a_cfg.encoder, img_shape=img_shape, device=cfg.trainer.device,
-            vanilla=bool(a_cfg.get("vanilla", False)),
+            obs_space=runner.obs_dim, 
+            act_space=runner.action_dim,
+            config=ppo_config
         )
         if distributed:
-            actor.ac = DDP(actor.ac, device_ids=[torch.cuda.current_device()] if torch.cuda.is_available() else None)
+            # PPOAgent wraps its model in self.model
+            actor.model = DDP(actor.model, device_ids=[torch.cuda.current_device()] if torch.cuda.is_available() else None)
         actors[aid] = actor
     return actors
 

@@ -93,22 +93,7 @@ python scripts/train.py env=overcooked agent=ppo run_id=experiment_1
 python scripts/train.py env=overcooked agent=ppo run.steps=50000 env.layout_name=cramped_room
 
 # Distributed training via torchrun (2 GPUs/Processes)
-torchrun --nproc_per_node=2 scripts/train.py env=overcooked agent=ppo run_id=dist_run dist=true
-
-# Distributed sweep using Hydra's multirun
-torchrun --nproc_per_node=2 scripts/train.py --multirun env=overcooked agent=ppo run.seed=42,43,44 dist=true
-```
-
-### 3. Evaluation & Playback
-
-```bash
-# Evaluate cross-play between checkpoints
-python coffeeshop/eval.py --env overcooked --layout cramped_room \
-    --ckpt_a checkpoints/run_1/model.pt \
-    --ckpt_b checkpoints/run_2/model.pt
-
-# Generate behavior GIFs
-python coffeeshop/playback.py checkpoints/run_1/model.pt --env overcooked --output demo.gif
+torchrun --nproc_per_node=2 scripts/train.py env=overcooked agent=ppo run_id=dist_run run.dist_backend=gloo
 ```
 
 ---
@@ -118,7 +103,6 @@ python coffeeshop/playback.py checkpoints/run_1/model.pt --env overcooked --outp
 ```text
 CoffeeShop/
 ├── agents/              # RL Algorithms (PPO optimized with TensorDict)
-├── coffeeshop/          # High-level execution layer (Main entry points)
 ├── conf/                # Hydra YAML configurations (agent, env, mediator, trainer)
 ├── core_marl/           # The Engine: Mediator, buffers, and social actors
 ├── envs/                # Environment wrappers (Overcooked, Crafter, NetHack, etc.)
@@ -136,18 +120,12 @@ CoffeeShop/
 
 ## 📜 Scripts & Entry Points
 
-CoffeeShop provides several ways to run the code:
-
-### Command Line Interfaces (CLIs)
-When installed as a package (`pip install -e .`), the following commands are available:
-- `coffeeshop-train`: Maps to `coffeeshop.train:main`
-- `coffeeshop-eval`: Maps to `coffeeshop.eval:main`
-- `coffeeshop-evaluate`: Maps to `coffeeshop.evaluate:evaluate`
-- `coffeeshop-playback`: Maps to `coffeeshop.playback:main`
-
-### Lightweight Scripts
-- `scripts/train.py`: A simplified training loop for quick debugging without full config hierarchy.
+### Main Entry Points
+- `scripts/train.py`: Unified training loop supporting single-process and distributed (DDP) execution via Hydra.
 - `scripts/evaluate.py`: Standalone evaluation utility.
+
+### Legacy Components
+Legacy orchestration layers (`coffeeshop/` and redundant `configs/`) have been removed in favor of the modernized `scripts/` and `conf/` workflow to ensure architectural consistency.
 
 ---
 

@@ -159,9 +159,12 @@ class CrafterSocialWrapper(SocialEnvWrapper):
             env.close()
 
     def _encode(self, raw_obs: np.ndarray) -> torch.Tensor:
-        arr = np.asarray(raw_obs, dtype=np.float32) / 255.0
-        arr = arr.transpose(2, 0, 1)   # HWC → CHW
-        return torch.from_numpy(arr.reshape(-1))
+        from einops import rearrange
+        # Normalization and HWC -> CHW transposition via einops
+        arr = torch.as_tensor(raw_obs, dtype=torch.float32) / 255.0
+        # Explicitly move to CHW then flatten
+        chw = rearrange(arr, 'h w c -> c h w')
+        return chw.reshape(-1)
 
 # Alias for import compatibility
 CrafterWrapper = CrafterSocialWrapper

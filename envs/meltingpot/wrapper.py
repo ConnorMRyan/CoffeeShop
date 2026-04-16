@@ -262,11 +262,13 @@ class MeltingPotWrapper(SocialEnvWrapper):
         return np.asarray(per_player_obs)
 
     def _to_tensor(self, arr: np.ndarray) -> torch.Tensor:
-        a = np.asarray(arr)
-        if a.dtype != np.float32:
-            if np.issubdtype(a.dtype, np.integer) and a.size > 0 and a.max() > 1:
-                a = a.astype(np.float32) / 255.0
-            else:
-                a = a.astype(np.float32)
-        flat = a.reshape(-1)
-        return torch.from_numpy(flat)
+        from einops import rearrange
+        a = torch.as_tensor(arr, dtype=torch.float32)
+        if a.max() > 1.0:
+            a /= 255.0
+        
+        # If it's an image (3D: HWC), move to CHW first
+        if a.ndim == 3:
+            a = rearrange(a, 'h w c -> c h w')
+            
+        return a.reshape(-1)

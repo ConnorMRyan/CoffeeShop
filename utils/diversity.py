@@ -1,61 +1,71 @@
 from __future__ import annotations
 
-import math
-from typing import Any, Dict, List
+from typing import List
 import numpy as np
 
 
-def jensen_shannon_divergence(p: np.ndarray, q: np.ndarray) -> float:
-    """Calculate the Jensen-Shannon divergence between two probability distributions.
+def jensen_shannon_divergence_batched(p: np.ndarray, q: np.ndarray) -> np.ndarray:
+    """
+    Calculate the Jensen-Shannon divergence between two batches of probability distributions.
 
     JS(P || Q) = 1/2 * KL(P || M) + 1/2 * KL(Q || M)
     where M = 1/2 * (P + Q)
 
     Args:
-        p: Probability distribution (numpy array).
-        q: Probability distribution (numpy array).
+        p, q: numpy arrays of shape [batch, actions].
+              Must be non-negative; will be normalized internally.
 
     Returns:
-        JS divergence value in [0, 1] (float, log base-2).
+        numpy array of shape [batch] containing JSD values in [0, 1] (log base-2).
     """
-    # Clip only the lower bound to avoid log(0).
-    # Do NOT clip to 1.0 — upper-clipping distorts near-deterministic
-    # distributions by compressing probability mass before renormalisation.
+    # Defensive clipping to avoid log(0) and ensure numerical stability
     p = np.clip(p, 1e-10, None)
     q = np.clip(q, 1e-10, None)
-    # Re-normalize
-    p /= p.sum()
-    q /= q.sum()
+
+    # Ensure distributions sum to 1 over the action dimension
+    p = p / p.sum(axis=-1, keepdims=True)
+    q = q / q.sum(axis=-1, keepdims=True)
 
     m = 0.5 * (p + q)
 
-    def kl_divergence(a: np.ndarray, b: np.ndarray) -> float:
-        # log base-2 ensures JSD is bounded in [0, 1]
-        return float(np.sum(a * np.log2(a / b)))
+    def kl_batched(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+        # Vectorized KL Divergence using log base-2 for [0, 1] boundedness
+        return np.sum(a * np.log2(a / b), axis=-1)
 
-    return 0.5 * kl_divergence(p, m) + 0.5 * kl_divergence(q, m)
+    return 0.5 * kl_batched(p, m) + 0.5 * kl_batched(q, m)
 
 
 def calculate_population_diversity(agent_distributions: List[np.ndarray]) -> float:
-    """Calculate the average JS divergence across all agent pairs in a population.
-
-    Returns the diversity value bounded in [0, 1] using log base 2.
     """
-    if not agent_distributions or len(agent_distributions) < 2:
+    Calculate the mean pairwise JSD across all agent pairs in a population.
+    This serves as a high-fidelity metric for behavioral diversity.
+
+    Args:
+        agent_distributions: List of numpy arrays, each of shape [batch, actions].
+                             One array per agent in the population.
+
+    Returns:
+        A float representing the mean pairwise diversity in [0, 1].
+        Returns 0.0 if fewer than 2 agents are provided.
+    """
+    num_agents = len(agent_distributions)
+    if num_agents < 2:
         return 0.0
 
-    num_agents = len(agent_distributions)
     total_js = 0.0
-    count = 0
+    pair_count = 0
 
+    # Iterate through all unique pairs (i, j)
     for i in range(num_agents):
         for j in range(i + 1, num_agents):
-            batch_js = []
-            for k in range(agent_distributions[i].shape[0]):
-                # jensen_shannon_divergence already uses log2, so result is in [0, 1]
-                js = jensen_shannon_divergence(agent_distributions[i][k], agent_distributions[j][k])
-                batch_js.append(js)
-            total_js += float(np.mean(batch_js))
-            count += 1
+            # Compute vectorized JSD for the entire batch of observations
+            pair_js_batch = jensen_shannon_divergence_batched(
+                agent_distributions[i],
+                agent_distributions[j]
+            )
 
-    return total_js / count if count > 0 else 0.0
+            # Average JSD across the probe batch for this specific pair
+            total_js += float(np.mean(pair_js_batch))
+            pair_count += 1
+
+    return total_js / pair_count
