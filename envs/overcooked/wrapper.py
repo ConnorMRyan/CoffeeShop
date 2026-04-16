@@ -44,6 +44,30 @@ class OvercookedSocialWrapper(SocialEnvWrapper):
         self.obs_space = DummySpace(shape=(flat_dim,))
         self.act_space = DummySpace(shape=(), n=6)
 
+    @property
+    def obs_space(self):
+        return self._obs_space
+
+    @obs_space.setter
+    def obs_space(self, value):
+        self._obs_space = value
+
+    @property
+    def act_space(self):
+        return self._act_space
+
+    @act_space.setter
+    def act_space(self, value):
+        self._act_space = value
+
+    def get_global_obs(self) -> Any:
+        """Return a global state for the centralized critic."""
+        # For Overcooked, we can concatenate the lossless encodings or use mdp state
+        if self._state is None:
+            return None
+        encodings = self.mdp.lossless_state_encoding(self._state)
+        return np.concatenate([encodings[0], encodings[1]], axis=-1).flatten()
+
     def _flatten_obs(self, obs: list) -> np.ndarray:
         return np.array(obs, dtype=np.float32).flatten()
 

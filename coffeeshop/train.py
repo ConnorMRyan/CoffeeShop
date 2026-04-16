@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import sys
 import os
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+import polars as pl
 
-import argparse
+import hydra
+from omegaconf import DictConfig, OmegaConf
 import time
 import logging
 from collections import defaultdict
@@ -11,14 +15,13 @@ from typing import Any, Dict
 
 import numpy as np
 import torch
-from omegaconf import OmegaConf
 from einops import rearrange
 
 from utils import get_logger, Metrics, TBWriter, WandbWriter
 from utils.checkpointing import Checkpointer
 from utils.factory import make_env, _env_idx, make_actors, VectorSocialRunner
 from utils.metrics import measure_population_diversity
-from core_marl.mediator import CoffeeShopMediator
+from core_marl import Mediator
 from core_marl.memory import ScoredMemory
 from agents.ppo import PPOAgent as SocialActor
 from envs import SocialEnvWrapper
@@ -39,80 +42,36 @@ def shuffle_partners(runner: VectorSocialRunner, actors: Dict[str, SocialActor],
         for new_key in slot: actors[new_key].agent_id = new_key
     log.info({"event": "partner_shuffle", "step": step})
 
-def load_config() -> Any:
-    """Load and merge hierarchical configuration correctly."""
-    # 1. Parse 'known' arguments to find which files to load
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--env", type=str, default="overcooked")
-    parser.add_argument("--agent", type=str, default="ppo")
-    parser.add_argument("--mediator", type=str, default="default")
-    parser.add_argument("--trainer", type=str, default="default")
-    parser.add_argument("--baseline", action="store_true", help="Run without social features")
-    # Capture the env=overcooked style overrides
-    parser.add_argument("overrides", nargs="*", help="CLI overrides")
-    args, unknown = parser.parse_known_args()
+def setup_distributed(backend: str = "gloo") -> tuple[int, int]:
+    if not dist.is_available():
+        return 0, 1
+    if not dist.is_initialized():
+        rank = int(os.environ.get("RANK", 0))
+        world_size = int(os.environ.get("WORLD_SIZE", 1))
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        if "cuda" in backend and torch.cuda.is_available():
+            torch.cuda.set_device(local_rank)
+            dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
+        else:
+            dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
+        return rank, world_size
+    return dist.get_rank(), dist.get_world_size()
 
-    # 2. Extract shorthand overrides (env=aisaac) from the list
-    cli_overrides = OmegaConf.from_dotlist(args.overrides + unknown)
+@hydra.main(version_base=None, config_path="../conf", config_name="config")
+def main(cfg: DictConfig) -> None:
+    # 0. Distributed Setup
+    rank, world_size = setup_distributed(backend=cfg.run.get("dist_backend", "gloo"))
+    is_main_process = (rank == 0)
 
-    # Priority: CLI shorthand > Argparse Flag > Default "default"
-    env_name = cli_overrides.get("env", args.env)
-    if not isinstance(env_name, str):
-        env_name = args.env
+    # Use hydra.utils.get_original_cwd() for path compatibility
+    original_cwd = hydra.utils.get_original_cwd()
+    # os.chdir(original_cwd) # Hydra handles run dir, but if we need relative paths to work:
 
-    agent_name = cli_overrides.get("agent", args.agent)
-    if not isinstance(agent_name, str):
-        agent_name = args.agent
-
-    mediator_name = cli_overrides.get("mediator", args.mediator)
-    if not isinstance(mediator_name, str):
-        mediator_name = args.mediator
-
-    trainer_name = cli_overrides.get("trainer", args.trainer)
-    if not isinstance(trainer_name, str):
-        trainer_name = args.trainer
-
-    # 3. Load the actual YAML objects
-    base_cfg = OmegaConf.create({
-        "env": OmegaConf.load(f"configs/env/{env_name}.yaml"),
-        "agent": OmegaConf.load(f"configs/agent/{agent_name}.yaml"),
-        "mediator": OmegaConf.load(f"configs/mediator/{mediator_name}.yaml"),
-        "trainer": OmegaConf.load(f"configs/trainer/{trainer_name}.yaml"),
-    })
-
-    # 4. Filter out the 'shorthand' keys so they don't overwrite our dicts with strings
-    # We want to keep 'trainer.seed=10' but remove 'trainer=default'
-    final_overrides = OmegaConf.create()
-    for k, v in cli_overrides.items():
-        if k in ["env", "agent", "mediator", "trainer"] and isinstance(v, str):
-            continue
-        final_overrides[k] = v
-
-    # 5. Final Merge: Files + Parameter Overrides
-    cfg = OmegaConf.merge(base_cfg, final_overrides)
-
-    # 5b. Default non_blocking for CUDA
-    if not OmegaConf.select(cfg, "trainer.non_blocking"):
-        cfg.trainer.non_blocking = (cfg.trainer.device != "cpu")
-
-    # 6. Apply Baseline suppression if flag is set
-    if args.baseline:
-        cfg.agent.vanilla = True      # pure PPO: no BC loss, no mediator pushes
-        cfg.trainer.baseline = True
-        cfg.trainer.num_envs = 1      # single env — no cross-training value in vanilla PPO
-    else:
-        cfg.agent.vanilla = False
-        cfg.trainer.baseline = False
-
-    return cfg
-
-def main() -> None:
-
-
-    cfg = load_config()
     t_cfg, e_cfg, a_cfg, m_cfg = cfg.trainer, cfg.env, cfg.agent, cfg.mediator
 
-    torch.manual_seed(t_cfg.seed); np.random.seed(t_cfg.seed); log = get_logger()
+    # Apply rank to seed for uniqueness across processes
+    base_seed = t_cfg.seed + rank
+    torch.manual_seed(base_seed); np.random.seed(base_seed); log = get_logger()
     run_id = t_cfg.run_id or time.strftime("%Y%m%d_%H%M%S")
     checkpointer = Checkpointer(
         dirpath=os.path.abspath(t_cfg.checkpoint_dir),
@@ -133,7 +92,7 @@ def main() -> None:
     runner = VectorSocialRunner(make_env, t_cfg.num_envs, e_cfg.name, e_cfg.params, "human" if t_cfg.render else None)
     
     img_shape = ((m_cfg.img_c, m_cfg.img_h, m_cfg.img_w) if m_cfg.encoder == "cnn" else None)
-    mediator = CoffeeShopMediator(
+    mediator = Mediator(
         global_obs_dim=runner.global_obs_dim,
         buffer_capacity=m_cfg.buffer_capacity,
         gamma=m_cfg.gamma,
@@ -149,7 +108,7 @@ def main() -> None:
         baseline_max_jump=m_cfg.get("baseline_max_jump", 2.0),
         target_tau=m_cfg.get("target_tau", 0.005),
     )
-    actors = make_actors(runner, mediator, cfg)
+    actors = make_actors(runner, mediator, cfg, distributed=(world_size > 1))
 
     # --- Robust Loading ---
     if t_cfg.checkpoint_path and os.path.isfile(t_cfg.checkpoint_path):
@@ -398,6 +357,8 @@ def main() -> None:
             state["run_args"] = OmegaConf.to_container(cfg, resolve=True)
             checkpointer.save(state, filename=f"checkpoint_{t+1}.pt")
     runner.close(); tb.close(); wb.close()
+    if is_main_process:
+        metrics.report_final(f"metrics_rank{rank}.parquet")
 
 if __name__ == "__main__":
     main()

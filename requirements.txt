@@ -3,8 +3,9 @@
 # ==============================================================================
 
 # -- Core Utilities --
-numpy==1.24.0
+numpy==1.26.4
 scipy==1.10.0
+polars==0.20.18
 pyyaml==6.0
 rich==13.7.0
 loguru==0.7.0
@@ -12,8 +13,8 @@ packaging==24.0
 tqdm==4.66.0
 
 # -- Config Management --
-omegaconf>=2.3.0
-# hydra-core>=1.3.0       # Uncomment if you adopt Hydra for YAML config routing
+omegaconf==2.3.0
+hydra-core==1.3.2
 
 # -- PyTorch Ecosystem --
 # Defaulting to standard PyPI (which defaults to CUDA on Linux/Windows).
@@ -21,6 +22,8 @@ omegaconf>=2.3.0
 # --extra-index-url https://download.pytorch.org/whl/cpu
 
 torch==2.2.0
+tensordict==0.12.1
+einops==0.7.0
 # torchvision>=0.17.0     # Optional: Uncomment if visual observations are used
 # torchaudio>=2.2.0       # Optional
 

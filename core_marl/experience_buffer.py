@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import heapq
 from collections import deque
-from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Tuple
+
+import torch
+import numpy as np
+from tensordict import TensorDict
 
 @dataclass
 class ExperienceBatch:
@@ -16,6 +19,33 @@ class ExperienceBatch:
     truncated: List[Dict[str, bool]] = field(default_factory=list)
     next_observations: List[Dict[str, Any]] = field(default_factory=list)
     infos: List[Dict[str, Any]] = field(default_factory=list)
+
+    def to_tensordict(self) -> TensorDict:
+        """Convert the batch to a TensorDict for efficient processing."""
+        # Multi-agent dicts are converted to nested TensorDicts
+        # Observations: (T, num_agents, obs_dim) or (T, agents) dict
+        
+        # We need to know the agent IDs to group them properly
+        if not self.observations:
+            return TensorDict({}, batch_size=[0])
+            
+        agent_ids = list(self.observations[0].keys())
+        T = len(self.observations)
+        
+        data = {}
+        for key in ["observations", "actions", "rewards", "terminated", "truncated", "next_observations"]:
+            val_list = getattr(self, key)
+            if not val_list: continue
+            
+            agent_data = {}
+            for aid in agent_ids:
+                # Stack across time T
+                stacked = np.stack([t_dict[aid] for t_dict in val_list])
+                agent_data[aid] = torch.as_tensor(stacked)
+            
+            data[key] = TensorDict(agent_data, batch_size=[T])
+            
+        return TensorDict(data, batch_size=[T])
 
 @dataclass
 class PrioritizedMemory:

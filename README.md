@@ -19,11 +19,13 @@ Designed for research and rapid experimentation, CoffeeShop provides a unified A
 ## 🛠️ Stack & Requirements
 
 - **Language:** Python 3.9+
-- **Deep Learning:** [PyTorch](https://pytorch.org/) 2.2+
+- **Deep Learning:** [PyTorch](https://pytorch.org/) 2.2.0
+- **High Performance:** [Tensordict](https://github.com/pytorch/tensordict), [Einops](https://einops.rocks/), [Polars](https://pola.rs/)
 - **RL Ecosystem:** [Gymnasium](https://gymnasium.farama.org/), [Shimmy](https://shimmy.farama.org/)
-- **Configuration:** [OmegaConf](https://omegaconf.readthedocs.io/)
+- **Configuration:** [Hydra](https://hydra.cc/) (formerly OmegaConf)
 - **Logging & UI:** [Rich](https://github.com/Textualize/rich), [Loguru](https://github.com/Delgan/loguru), [tqdm](https://github.com/tqdm/tqdm)
-- **Experiment Tracking:** [WandB](https://wandb.ai/), [TensorBoard](https://www.tensorflow.org/tensorboard)
+
+> **Note:** Due to compatibility issues between PyTorch and NumPy 2.0, this project requires **NumPy < 2.0** (specifically `1.26.4`).
 
 ---
 
@@ -47,17 +49,20 @@ pip install ".[all]"
 
 ### 2. Training a Population
 
-The primary entry point is `coffeeshop/train.py`. You can use shorthand CLI overrides:
+The primary entry point is `scripts/train.py` (orchestrated via Hydra).
 
 ```bash
-# Train with default config (Overcooked)
-python coffeeshop/train.py
+# Standard single-process run
+python scripts/train.py env=overcooked agent=ppo run_id=experiment_1
 
-# Override environment and steps
-python coffeeshop/train.py env=crafter trainer.total_steps=5000000 trainer.device=cuda
+# Overriding environment and steps
+python scripts/train.py env=overcooked agent=ppo run.steps=50000 env.layout_name=cramped_room
 
-# Run a vanilla PPO baseline (disables social features)
-python coffeeshop/train.py --baseline
+# Distributed training via torchrun (2 GPUs/Processes)
+torchrun --nproc_per_node=2 scripts/train.py env=overcooked agent=ppo run_id=dist_run dist=true
+
+# Distributed sweep using Hydra's multirun
+torchrun --nproc_per_node=2 scripts/train.py --multirun env=overcooked agent=ppo run.seed=42,43,44 dist=true
 ```
 
 ### 3. Evaluation & Playback
@@ -78,20 +83,18 @@ python coffeeshop/playback.py checkpoints/run_1/model.pt --env overcooked --outp
 
 ```text
 CoffeeShop/
-├── agents/              # RL Algorithms (PPO, SAC stubs)
+├── agents/              # RL Algorithms (PPO optimized with TensorDict)
 ├── coffeeshop/          # High-level execution layer (Main entry points)
-│   ├── train.py         # Main training orchestrator
-│   ├── eval.py          # Evaluation loops
-│   └── playback.py      # Rendering and GIF generation
-├── configs/             # OmegaConf YAML files (agent, env, mediator, trainer)
+├── conf/                # Hydra YAML configurations (agent, env, mediator, trainer)
 ├── core_marl/           # The Engine: Mediator, buffers, and social actors
 ├── envs/                # Environment wrappers (Overcooked, Crafter, NetHack, etc.)
 ├── models/              # Neural network architectures (MLP, CNN encoders)
-├── scripts/             # Lightweight/standalone utility scripts
-├── test/                # Core unit and integration tests (pytest)
-├── utils/               # Shared utilities (metrics, checkpointing, factories)
-├── pyproject.toml       # Package metadata and CLI tool definitions
-└── requirements.txt     # Core dependencies
+├── outputs/             # Default Hydra output directory for logs and parquet metrics
+├── scripts/             # Main training and evaluation scripts
+├── tests/               # Core unit and integration tests (pytest + Hypothesis)
+├── utils/               # Shared utilities (metrics, diversity analysis, factories)
+├── pyproject.toml       # Package metadata and locked dependencies
+└── requirements.txt     # Version-locked core dependencies
 ```
 
 ---
@@ -118,13 +121,12 @@ When installed as a package (`pip install -e .`), the following commands are ava
 Run the test suite using `pytest`:
 
 ```bash
-pytest test/
+pytest tests/
 ```
 
 Key tests:
-- `test/test_smoke.py`: Verifies a short training run (1k steps).
-- `test/test_experience_buffer.py`: Tests for prioritized and shared buffers.
-- `test/test_mediator_math.py`: Validates social trust and TD-error logic.
+- `tests/test_invariants.py`: Property-based testing for buffer integrity using Hypothesis.
+- `tests/test_experience_buffer.py`: Core logic for experience collection and sampling.
 
 ---
 

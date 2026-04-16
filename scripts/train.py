@@ -1,68 +1,120 @@
 from __future__ import annotations
 
-import argparse
-from typing import Any, Dict, List
+import os
+import hydra
+from omegaconf import DictConfig, OmegaConf
+from typing import Any, Dict, List, Optional
 
 from utils import get_logger, Metrics
 from utils.diversity import calculate_population_diversity
-from core_marl import Mediator
+from core_marl import Mediator, SocialActor, SocialActorConfig, ExperienceBuffer, SharedExperienceBuffer
 from envs import SocialEnvWrapper
-from core_marl.social_actor import SocialActor, SocialActorConfig
-from core_marl.experience_buffer import ExperienceBuffer, SharedExperienceBuffer
 import numpy as np
 import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 from einops import rearrange, reduce
 
 # Lazy imports to keep optional deps optional
 
-def make_env(name: str, params: Dict[str, Any]) -> SocialEnvWrapper:
+def setup_distributed(backend: str = "gloo") -> tuple[int, int]:
+    if not dist.is_available():
+        return 0, 1
+    
+    # Check if we are running under torchrun
+    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+        if not dist.is_initialized():
+            rank = int(os.environ.get("RANK", 0))
+            world_size = int(os.environ.get("WORLD_SIZE", 1))
+            local_rank = int(os.environ.get("LOCAL_RANK", 0))
+            
+            if "cuda" in backend and torch.cuda.is_available():
+                torch.cuda.set_device(local_rank)
+                dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
+            else:
+                dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
+            return rank, world_size
+        return dist.get_rank(), dist.get_world_size()
+    else:
+        # Not running in distributed mode
+        return 0, 1
+
+def make_env(name: str, params: Dict[str, Any], seed: Optional[int] = None) -> SocialEnvWrapper:
     name = name.lower()
     if name == "overcooked":
         from envs.overcooked.wrapper import OvercookedSocialWrapper
-        return OvercookedSocialWrapper(**params)
-    if name == "crafter":
+        env = OvercookedSocialWrapper(**params)
+    elif name == "crafter":
         from envs.crafter.wrapper import CrafterWrapper
-        return CrafterWrapper(**params)
-    if name == "nethack":
+        env = CrafterWrapper(**params)
+    elif name == "nethack":
         from envs.nethack.wrapper import NetHackWrapper
-        return NetHackWrapper(**params)
-    if name == "aisaac":
+        env = NetHackWrapper(**params)
+    elif name == "aisaac":
         from envs.aisaac.wrapper import AIsaacWrapper
-        return AIsaacWrapper(**params)
-    raise ValueError(f"Unknown env name: {name}")
+        env = AIsaacWrapper(**params)
+    else:
+        raise ValueError(f"Unknown env name: {name}")
+    
+    if seed is not None:
+        env.reset(seed=seed)
+    return env
 
 
-def make_agent(name: str, obs_space=None, act_space=None):
+def make_agent(name: str, obs_space=None, act_space=None, distributed: bool = False):
     name = name.lower()
     if name == "ppo":
         from agents.ppo import PPOAgent
-        return PPOAgent(obs_space, act_space)
+        agent = PPOAgent(obs_space, act_space)
+        if distributed:
+            # Wrap model in DDP
+            agent.model = DDP(agent.model)
+        return agent
     if name == "sac":
         from agents.sac import SACAgent
         return SACAgent(obs_space, act_space)
     raise ValueError(f"Unknown agent name: {name}")
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--env", default="overcooked")
-    parser.add_argument("--layout", default="cramped_room")
-    parser.add_argument("--agent", default="ppo")
-    parser.add_argument("--steps", type=int, default=1000)
-    parser.add_argument("--horizon", type=int, default=200) # Local rollout horizon
-    parser.add_argument("--meeting_interval", type=int, default=400) # When to share experiences
-    args = parser.parse_args()
+@hydra.main(version_base=None, config_path="../conf", config_name="config")
+def main(cfg: DictConfig) -> None:
+    # 0. Distributed Setup
+    rank, world_size = setup_distributed(backend=cfg.run.get("dist_backend", "gloo"))
+    is_main_process = (rank == 0)
 
+    # Set deterministic run if seed provided
+    if cfg.run.seed is not None:
+        torch.manual_seed(cfg.run.seed + rank)
+        np.random.seed(cfg.run.seed + rank)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
+    # Use hydra.utils.get_original_cwd() for path compatibility
+    original_cwd = hydra.utils.get_original_cwd()
+    
     log = get_logger()
+    if not is_main_process:
+        # Suppress logging for non-main processes if needed, 
+        # or just let them log with rank prefix.
+        pass
 
-    # Build environment and mediator
-    env = make_env(args.env, {"layout_name": args.layout} if args.env == "overcooked" else {})
+    # 1. Build environment and mediator
+    # Apply seed offset for diversity in parallel envs
+    base_seed = cfg.run.get("seed", 42)
+    env_seed = base_seed + rank
+    
+    env_params = {}
+    if cfg.env.name == "overcooked":
+        env_params["layout_name"] = cfg.env.layout_name
+        
+    env = make_env(cfg.env.name, env_params, seed=env_seed)
     mediator = Mediator(env)
 
-    # Build base PPO agent
-    base_agent = make_agent(args.agent, env.obs_space, env.act_space)
+    # 2. Build base agent
+    # We pass distributed=True to wrap the internal model in DDP
+    base_agent = make_agent(cfg.agent.name, env.obs_space, env.act_space, distributed=(world_size > 1))
     
-    # Wrap in SocialActors (decentralized accounts, shared policy weights mapping for simplicity)
+    # Wrap in SocialActors
     actors = {
         aid: SocialActor(base_agent, SocialActorConfig(id=aid, omega_init=0.1, omega_learnable=False))
         for aid in mediator.agent_ids
@@ -79,13 +131,11 @@ def main() -> None:
     # Store temporary transitions before stepping
     last_act_info = {}
 
-    for t in range(args.steps):
+    for t in range(cfg.run.steps):
         # 1. Actors act
         env_actions = {}
         act_info_dict = {}
         
-        # Vectorized actor calls (if agent supports batching) - for now, per-agent
-        # But we minimize data transfer within the loop
         for aid, actor in actors.items():
             act_info = actor.act(obs[aid])
             if act_info is not None:
@@ -108,7 +158,7 @@ def main() -> None:
                 )
 
         # 4. Trigger PPO Update
-        if (t + 1) % args.horizon == 0:
+        if (t + 1) % cfg.run.horizon == 0:
             # Calculate last values for bootstrapping
             last_vals = {}
             for aid, single_obs in obs.items():
@@ -121,7 +171,7 @@ def main() -> None:
             metrics.update(update_metrics)
             
         # 5. The Meeting (Asynchronous Social Sharing)
-        if (t + 1) % args.meeting_interval == 0:
+        if (t + 1) % cfg.run.meeting_interval == 0:
             batch_to_share = local_buffer.export()
             local_buffer.clear()
             
@@ -180,6 +230,10 @@ def main() -> None:
         if any(terminated.values()) or any(truncated.values()):
             obs, infos = mediator.reset()
 
+    if is_main_process:
+        output_dir = hydra.core.hydra_config.HydraConfig.get().runtime.output_dir
+        metrics.report_final(os.path.join(output_dir, f"metrics_rank{rank}.parquet"))
+    
     mediator.close()
     log.info("Training complete.")
 

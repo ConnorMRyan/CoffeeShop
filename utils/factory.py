@@ -1,5 +1,6 @@
 from __future__ import annotations
 import argparse
+import os
 import torch
 from typing import Any, Dict, Optional, TYPE_CHECKING, Union
 from omegaconf import DictConfig
@@ -33,13 +34,16 @@ def _env_idx(agent_id: str) -> int:
     """Extract environment index from a global agent ID (e.g., 'env0_agent_1' -> 0)."""
     return int(agent_id.split("_")[0][3:])
 
-def make_actors(runner: "VectorSocialRunner", mediator: CoffeeShopMediator, cfg: DictConfig) -> Dict[str, SocialActor]:
+def make_actors(runner: "VectorSocialRunner", mediator: CoffeeShopMediator, cfg: DictConfig, distributed: bool = False) -> Dict[str, SocialActor]:
     """Factory to create SocialActor (PPOAgent) instances."""
     from agents.ppo import PPOAgent as SocialActor
+    from torch.nn.parallel import DistributedDataParallel as DDP
     a_cfg = cfg.agent
     img_shape = (a_cfg.img_c, a_cfg.img_h, a_cfg.img_w) if a_cfg.encoder == "cnn" else None
-    return {
-        aid: SocialActor(
+    
+    actors = {}
+    for aid in runner.agent_ids:
+        actor = SocialActor(
             agent_id=aid, obs_space=runner.obs_dim, act_space=runner.action_dim,
             global_obs_dim=runner.global_obs_dim, mediator=mediator,
             gamma=a_cfg.gamma, lam=a_cfg.lam, clip_eps=a_cfg.clip_eps,
@@ -47,14 +51,21 @@ def make_actors(runner: "VectorSocialRunner", mediator: CoffeeShopMediator, cfg:
             mini_batch_size=a_cfg.mini_batch_size, lr=a_cfg.lr, push_every=cfg.trainer.push_every,
             hidden=a_cfg.hidden, encoder=a_cfg.encoder, img_shape=img_shape, device=cfg.trainer.device,
             vanilla=bool(a_cfg.get("vanilla", False)),
-        ) for aid in runner.agent_ids
-    }
+        )
+        if distributed:
+            actor.ac = DDP(actor.ac, device_ids=[torch.cuda.current_device()] if torch.cuda.is_available() else None)
+        actors[aid] = actor
+    return actors
 
 class VectorSocialRunner:
     """Manages parallel SocialEnvWrapper instances."""
     def __init__(self, make_env_fn, num_envs: int, env_name: str, env_params: Dict[str, Any], render_mode: str | None):
         self.num_envs = num_envs
         self.envs = [make_env_fn(env_name, dict(env_params), render_mode=render_mode) for _ in range(num_envs)]
+        # Add rank-based seed offset to sub-environments
+        for i, env in enumerate(self.envs):
+            rank = int(os.environ.get("RANK", 0))
+            env.reset(seed=rank * 1000 + i)
         self.agent_ids = [f"env{e}_agent_{i}" for e in range(num_envs) for i in range(len(self.envs[e].agent_ids))]
         self.obs_dim, self.action_dim, self.global_obs_dim = self.envs[0].obs_dim, self.envs[0].action_dim, self.envs[0].global_obs_dim
 

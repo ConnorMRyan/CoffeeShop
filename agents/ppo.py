@@ -8,6 +8,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.distributions import Categorical
+from tensordict import TensorDict, MemoryMappedTensor
 
 @dataclass
 class PPOConfig:
@@ -46,54 +47,62 @@ class ActorCritic(nn.Module):
         return dist, value
 
 class RolloutBuffer:
-    def __init__(self):
-        self.obs = []
-        self.acts = []
-        self.rewards = []
-        self.vals = []
-        self.logps = []
-        self.terminals = []
+    def __init__(self, capacity: int = 2048, obs_shape: tuple = (96,), act_dim: int = 1):
+        self.capacity = capacity
+        # Use MemoryMappedTensor for high-throughput zero-copy sharing
+        self.data = TensorDict({
+            "obs": MemoryMappedTensor.empty((capacity, *obs_shape), dtype=torch.float32),
+            "act": MemoryMappedTensor.empty((capacity,), dtype=torch.long),
+            "rew": MemoryMappedTensor.empty((capacity,), dtype=torch.float32),
+            "val": MemoryMappedTensor.empty((capacity,), dtype=torch.float32),
+            "logp": MemoryMappedTensor.empty((capacity,), dtype=torch.float32),
+            "term": MemoryMappedTensor.empty((capacity,), dtype=torch.bool),
+        }, batch_size=[capacity])
+        self.ptr = 0
 
     def store(self, obs, act, reward, val, logp, terminal):
-        self.obs.append(obs)
-        self.acts.append(act)
-        self.rewards.append(reward)
-        self.vals.append(val)
-        self.logps.append(logp)
-        self.terminals.append(terminal)
+        if self.ptr >= self.capacity:
+            return # Full
+        self.data["obs"][self.ptr] = torch.as_tensor(obs)
+        self.data["act"][self.ptr] = torch.as_tensor(act)
+        self.data["rew"][self.ptr] = torch.as_tensor(reward)
+        self.data["val"][self.ptr] = torch.as_tensor(val)
+        self.data["logp"][self.ptr] = torch.as_tensor(logp)
+        self.data["term"][self.ptr] = torch.as_tensor(terminal)
+        self.ptr += 1
 
     def get(self, gamma=0.99, lam=0.95, last_val=0.0):
-        # Calculate GAE
-        # last_val is the value of the final state (bootstrapping for truncations)
-        vals = self.vals + [last_val]
-        advs = np.zeros(len(self.rewards), dtype=np.float32)
-        last_gaelam = 0
-        for t in reversed(range(len(self.rewards))):
-            nextnonterminal = 1.0 - self.terminals[t]
-            delta = self.rewards[t] + gamma * vals[t+1] * nextnonterminal - vals[t]
-            advs[t] = last_gaelam = delta + gamma * lam * nextnonterminal * last_gaelam
+        # Slice the valid data
+        valid_data = self.data[:self.ptr]
         
-        rets = advs + np.array(self.vals)
-        data = dict(
-            obs=torch.as_tensor(np.array(self.obs, dtype=np.float32)),
-            act=torch.as_tensor(np.array(self.acts, dtype=np.int64)),
-            ret=torch.as_tensor(rets, dtype=torch.float32),
-            adv=torch.as_tensor(advs, dtype=torch.float32),
-            logp=torch.as_tensor(np.array(self.logps, dtype=np.float32)),
-        )
+        # Compute GAE and returns
+        rews = valid_data["rew"].numpy()
+        vals = np.append(valid_data["val"].numpy(), last_val)
+        terms = valid_data["term"].numpy()
+        
+        adv = np.zeros_like(rews)
+        last_gae = 0
+        for t in reversed(range(self.ptr)):
+            delta = rews[t] + gamma * vals[t+1] * (1 - terms[t]) - vals[t]
+            adv[t] = last_gae = delta + gamma * lam * (1 - terms[t]) * last_gae
+            
+        ret = adv + vals[:-1]
+        
+        data = {
+            'obs': valid_data["obs"].clone(), # Clone to ensure it's not MM anymore when passed to training
+            'act': valid_data["act"].clone(),
+            'ret': torch.as_tensor(ret, dtype=torch.float32),
+            'adv': torch.as_tensor(adv, dtype=torch.float32),
+            'logp': valid_data["logp"].clone()
+        }
         self.clear()
         return data
-        
+
     def clear(self):
-        self.obs.clear()
-        self.acts.clear()
-        self.rewards.clear()
-        self.vals.clear()
-        self.logps.clear()
-        self.terminals.clear()
-        
+        self.ptr = 0
+
     def __len__(self):
-        return len(self.obs)
+        return self.ptr
 
 class PPOAgent:
     """PyTorch PPO agent."""
@@ -122,7 +131,11 @@ class PPOAgent:
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.config.lr)
         
         # Buffer per agent_id for shared weight models
-        self.buffers: Dict[str, RolloutBuffer] = collections.defaultdict(RolloutBuffer)
+        obs_shape = obs_space.shape if hasattr(obs_space, "shape") else (96,)
+        self.buffers: Dict[str, RolloutBuffer] = {
+            aid: RolloutBuffer(capacity=4096, obs_shape=obs_shape) 
+            for aid in ["agent_0", "agent_1"]
+        }
 
     def act(self, obs: Dict[str, Any], deterministic: bool = False) -> Dict[str, Any]:
         """Return actions per agent_id."""
@@ -150,6 +163,10 @@ class PPOAgent:
         return dists
 
     def store_transition(self, aid: str, obs: Any, act: int, reward: float, val: float, logp: float, terminal: bool):
+        if aid not in self.buffers:
+            # Dynamically add buffer if new agent encountered (unlikely in this repo but good for robustness)
+            obs_shape = obs.shape if hasattr(obs, "shape") else (96,)
+            self.buffers[aid] = RolloutBuffer(capacity=4096, obs_shape=obs_shape)
         self.buffers[aid].store(obs, act, reward, val, logp, terminal)
 
     def behavior_cloning_update(self, aid: str, obs_batch: torch.Tensor, act_batch: torch.Tensor, omega: Any) -> float:
@@ -174,7 +191,7 @@ class PPOAgent:
         
         last_vals: Map of agent_id to the value of the final observation in the rollout.
         """
-        all_obs, all_act, all_ret, all_adv, all_logp = [], [], [], [], []
+        all_data = []
         
         total_steps = 0
         for aid, buf in self.buffers.items():
@@ -184,43 +201,48 @@ class PPOAgent:
             last_val = last_vals.get(aid, 0.0) if last_vals else 0.0
             data = buf.get(self.config.gamma, self.config.lam, last_val=last_val)
             
-            # Per-agent advantage normalization to prevent high-reward agents from dominating gradients
+            # Per-agent advantage normalization
             adv = data['adv']
             data['adv'] = (adv - adv.mean()) / (adv.std() + 1e-8)
             
-            all_obs.append(data['obs'])
-            all_act.append(data['act'])
-            all_ret.append(data['ret'])
-            all_adv.append(data['adv'])
-            all_logp.append(data['logp'])
+            # Convert dict to TensorDict
+            td = TensorDict({
+                "obs": data['obs'],
+                "act": data['act'],
+                "ret": data['ret'],
+                "adv": data['adv'],
+                "logp": data['logp']
+            }, batch_size=[len(data['obs'])])
+            
+            all_data.append(td)
+            
             total_steps += len(data['obs'])
             
         if total_steps == 0:
             return {"loss_policy": 0.0, "loss_value": 0.0}
 
-        obs = torch.cat(all_obs).to(self.device)
-        act = torch.cat(all_act).to(self.device)
-        ret = torch.cat(all_ret).to(self.device)
-        adv = torch.cat(all_adv).to(self.device)
-        logp_old = torch.cat(all_logp).to(self.device)
+        # tensordict Integration: Single line cat and move to device
+        data = torch.cat(all_data, dim=0).to(self.device)
 
-        # Dataset for minibatch updates
-        dataset = torch.utils.data.TensorDataset(obs, act, ret, adv, logp_old)
-        loader = torch.utils.data.DataLoader(dataset, batch_size=self.config.minibatch_size, shuffle=True)
-
+        # Dataset for minibatch updates using TensorDict
+        indices = torch.randperm(total_steps)
+        
         avg_pi_loss = 0.0
         avg_v_loss = 0.0
         updates = 0
 
         for _ in range(self.config.update_epochs):
-            for b_obs, b_act, b_ret, b_adv, b_logp in loader:
-                dist, val = self.model(b_obs)
-                logp = dist.log_prob(b_act)
-                ratio = torch.exp(logp - b_logp)
+            for i in range(0, total_steps, self.config.minibatch_size):
+                idx = indices[i:i+self.config.minibatch_size]
+                batch = data[idx]
                 
-                clip_adv = torch.clamp(ratio, 1 - self.config.clip_ratio, 1 + self.config.clip_ratio) * b_adv
-                loss_pi = -(torch.min(ratio * b_adv, clip_adv)).mean()
-                loss_v = ((val.squeeze(-1) - b_ret)**2).mean() * self.config.value_coef
+                dist, val = self.model(batch["obs"])
+                logp = dist.log_prob(batch["act"])
+                ratio = torch.exp(logp - batch["logp"])
+                
+                clip_adv = torch.clamp(ratio, 1 - self.config.clip_ratio, 1 + self.config.clip_ratio) * batch["adv"]
+                loss_pi = -(torch.min(ratio * batch["adv"], clip_adv)).mean()
+                loss_v = ((val.squeeze(-1) - batch["ret"])**2).mean() * self.config.value_coef
                 loss_ent = -dist.entropy().mean() * self.config.entropy_coef
                 
                 loss = loss_pi + loss_v + loss_ent

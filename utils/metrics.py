@@ -1,22 +1,20 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Dict, List, TYPE_CHECKING
 import torch
 import torch.nn.functional as F
+import polars as pl
+import numpy as np
 
 if TYPE_CHECKING:
     from agents.ppo import PPOAgent as SocialActor
-    from core_marl.mediator import CoffeeShopMediator
+    from core_marl.mediator import Mediator as CoffeeShopMediator
 
 @dataclass
 class Metrics:
-    """Lightweight metrics accumulator.
-
-    Example:
-        m = Metrics()
-        m.update({'reward': 1.0})
-        mean = m.mean()
+    """Lightweight metrics accumulator using Polars for high-performance aggregation.
     """
 
     history: Dict[str, List[float]] = field(default_factory=dict)
@@ -26,10 +24,40 @@ class Metrics:
             self.history.setdefault(k, []).append(float(v))
 
     def mean(self) -> Dict[str, float]:
-        return {k: (sum(vs) / len(vs) if vs else 0.0) for k, vs in self.history.items()}
+        if not self.history:
+            return {}
+        
+        results = {}
+        for k, v in self.history.items():
+            if not v:
+                continue
+            # Use Polars for faster mean calculation on individual series
+            # Or just use numpy for simplicity if series are small
+            results[k] = float(np.mean(v))
+        return results
 
     def clear(self) -> None:
         self.history.clear()
+
+    def report_final(self, output_path: str = "metrics.parquet"):
+        """Save final metrics to a parquet file using Polars."""
+        if not self.history:
+            return
+        
+        # If columns have different lengths, Polars DataFrame constructor will fail.
+        # We find the max length and pad with NaN, or store as a list of series if needed.
+        # For a flat parquet, we should probably pad.
+        max_len = max(len(v) for v in self.history.values())
+        padded_history = {}
+        for k, v in self.history.items():
+            if len(v) < max_len:
+                padded_history[k] = v + [float('nan')] * (max_len - len(v))
+            else:
+                padded_history[k] = v
+        
+        df = pl.DataFrame(padded_history)
+        df.write_parquet(output_path)
+        print(f"Final metrics saved to {output_path}")
 
 
 def measure_population_diversity(actors: Dict[str, SocialActor], mediator: CoffeeShopMediator, device: str, batch_size: int = 64) -> float:
