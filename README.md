@@ -1,32 +1,34 @@
 # ☕ CoffeeShop: Asynchronous Social Experience Sharing for MARL
 
-CoffeeShop is a modular, Multi-Agent Reinforcement Learning (MARL) framework that implements **Asynchronous Social Experience Sharing**. It allows decentralized agents to learn independently while sharing high-value transitions through a centralized Mediator.
+CoffeeShop is a modular Multi-Agent Reinforcement Learning (MARL) framework that implements **Asynchronous Social Experience Sharing**. It allows decentralized agents to learn independently while sharing high-value transitions through a centralized Mediator.
 
 Designed for research and rapid experimentation, CoffeeShop provides a unified API for environments, hierarchical YAML configuration, and advanced telemetry for monitoring population metrics.
+
+> **Paper:** [CoffeeShop: Asynchronous Social Experience Sharing via Off-Policy Mediation in Multi-Agent Reinforcement Learning](./CoffeeShop_Refactored.md)
 
 ---
 
 ## ✨ Key Features
 
-- **Asynchronous Social Experience Sharing:** Agents push high-reward transitions to a central `PrioritizedBuffer`. A `CoffeeShopMediator` evaluates and broadcasts these memories back to the population.
-- **Dynamic Openness (ω):** Agents learn a continuous parameter ($\omega \in [0.05, 0.75]$) to dynamically weight how much they trust and clone behaviors broadcasted by the Mediator.
-- **Hierarchical Configuration:** Experiments are entirely config-driven via `OmegaConf`. Mix and match `agent`, `env`, `mediator`, and `trainer` parameters without touching Python code.
+- **Asynchronous Social Experience Sharing:** Agents push high-reward transitions to a central `PrioritizedBuffer`. A `CoffeeShopMediator` evaluates and broadcasts these trajectories back to the population.
+- **Dynamic Openness (ω):** Agents learn a continuous parameter (ω ∈ [0.05, 0.75]) that gates receptivity to Mediator-provided trajectories, scaled by internal value-network uncertainty.
+- **Hierarchical Configuration:** Experiments are entirely config-driven via [Hydra](https://hydra.cc/) (which uses [OmegaConf](https://omegaconf.readthedocs.io/) as its config backend). Mix and match `agent`, `env`, `mediator`, and `trainer` parameters without touching Python code.
 - **Strict API Contracts:** `SocialEnvWrapper` enforces a standardized dictionary-based API across different environments (Overcooked, Crafter, etc.).
-- **Enterprise Telemetry:** Built-in support for TensorBoard and Weights & Biases, including advanced metrics like **Population Diversity** (measured via Jensen-Shannon Divergence).
+- **Telemetry:** Built-in support for TensorBoard and Weights & Biases, including population-level metrics such as **Population Diversity** (measured via Jensen-Shannon Divergence).
 
 ---
 
 ## 🛠️ Stack & Requirements
 
-- **Language:** Python 3.10+ (Recommended for `tensordict` compatibility)
-- **Package Manager:** [uv](https://github.com/astral-sh/uv) (Highly recommended for fast environment setup)
+- **Language:** Python 3.10+ (required for `tensordict` compatibility)
+- **Package Manager:** [uv](https://github.com/astral-sh/uv) (recommended for fast, reproducible environment setup)
 - **Deep Learning:** [PyTorch](https://pytorch.org/) 2.2.0
 - **High Performance:** [Tensordict](https://github.com/pytorch/tensordict), [Einops](https://einops.rocks/), [Polars](https://pola.rs/)
 - **RL Ecosystem:** [Gymnasium](https://gymnasium.farama.org/), [Shimmy](https://shimmy.farama.org/)
-- **Configuration:** [Hydra](https://hydra.cc/) (formerly OmegaConf)
+- **Configuration:** [Hydra](https://hydra.cc/) + [OmegaConf](https://omegaconf.readthedocs.io/)
 - **Logging & UI:** [Rich](https://github.com/Textualize/rich), [Loguru](https://github.com/Delgan/loguru), [tqdm](https://github.com/tqdm/tqdm)
 
-> **Note:** Due to compatibility issues between PyTorch and NumPy 2.0, this project requires **NumPy < 2.0** (specifically `1.26.4`).
+> **Note:** Due to compatibility issues between PyTorch 2.2.0 and NumPy 2.0, this project requires **NumPy < 2.0** (specifically `1.26.4`).
 
 ---
 
@@ -34,12 +36,15 @@ Designed for research and rapid experimentation, CoffeeShop provides a unified A
 
 ### 1. Installation (Recommended: uv)
 
-CoffeeShop uses `uv` for lightning-fast, reproducible environments.
+`uv` is the canonical package manager for this project. `requirements.txt` is provided for legacy compatibility only; `uv.lock` is the authoritative lockfile.
 
 ```bash
-# Install uv if you haven't already
-powershell -c "irm https://astral-sh.uv.run/install.ps1 | iex" # Windows
-# curl -LsSf https://astral-sh.uv.run/install.sh | sh         # Linux/macOS
+# Install uv
+# Linux/macOS
+curl -LsSf https://astral-sh.uv.run/install.sh | sh
+
+# Windows (PowerShell)
+powershell -c "irm https://astral-sh.uv.run/install.ps1 | iex"
 
 # Clone the repository
 git clone https://github.com/ConnorMRyan/CoffeeShop.git
@@ -79,11 +84,11 @@ uv sync --all-extras
 pip install ".[all]"
 ```
 
-> **Note:** Some optional environments (like `crafter`) may face encoding issues during build on Windows. If `uv sync --all-extras` fails, install core dependencies first and then specific extras as needed.
+> **Note:** Some optional environments (like `crafter`) may face encoding issues during build on Windows. If `uv sync --all-extras` fails, install core dependencies first and then add specific extras as needed.
 
 ### 3. Training a Population
 
-The primary entry point is `scripts/train.py` (orchestrated via Hydra).
+The primary entry point is `scripts/train.py`, orchestrated via Hydra.
 
 ```bash
 # Standard single-process run
@@ -92,7 +97,7 @@ python scripts/train.py env=overcooked agent=ppo run_id=experiment_1
 # Overriding environment and steps
 python scripts/train.py env=overcooked agent=ppo run.steps=50000 env.layout_name=cramped_room
 
-# Distributed training via torchrun (2 GPUs/Processes)
+# Distributed training via torchrun (Linux/macOS, 2 processes)
 torchrun --nproc_per_node=2 scripts/train.py env=overcooked agent=ppo run_id=dist_run run.dist_backend=gloo
 ```
 
@@ -112,8 +117,8 @@ CoffeeShop/
 ├── tests/               # Core unit and integration tests (pytest + Hypothesis)
 ├── utils/               # Shared utilities (metrics, diversity analysis, factories)
 ├── pyproject.toml       # Package metadata and locked dependencies
-├── uv.lock              # Modern lockfile for reproducible environments
-└── requirements.txt     # Version-locked core dependencies (legacy)
+├── uv.lock              # Authoritative lockfile for reproducible environments
+└── requirements.txt     # Legacy pip dependencies
 ```
 
 ---
@@ -122,10 +127,10 @@ CoffeeShop/
 
 ### Main Entry Points
 - `scripts/train.py`: Unified training loop supporting single-process and distributed (DDP) execution via Hydra.
-- `scripts/evaluate.py`: Standalone evaluation utility.
+- `scripts/evaluate.py`: Standalone evaluation utility. Run `python scripts/evaluate.py --help` for available flags.
 
 ### Legacy Components
-Legacy orchestration layers (`coffeeshop/` and redundant `configs/`) have been removed in favor of the modernized `scripts/` and `conf/` workflow to ensure architectural consistency.
+Legacy orchestration layers (`coffeeshop/` and redundant `configs/`) have been removed in favour of the modernized `scripts/` and `conf/` workflow to ensure architectural consistency.
 
 ---
 
@@ -164,6 +169,21 @@ Key tests:
 
 ---
 
+## 📄 Citation
+
+If you use CoffeeShop in your research, please cite:
+
+```bibtex
+@misc{ryan2025coffeeshop,
+  title   = {CoffeeShop: Asynchronous Social Experience Sharing via Off-Policy Mediation in Multi-Agent Reinforcement Learning},
+  author  = {Ryan, Connor},
+  year    = {2025},
+  url     = {https://github.com/ConnorMRyan/CoffeeShop}
+}
+```
+
+---
+
 ## ⚖️ License
 
-TODO: Add license information (e.g., MIT, Apache 2.0).
+This project is licensed under the **Apache License 2.0**. See [LICENSE](./LICENSE) for details.
