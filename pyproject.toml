@@ -18,7 +18,7 @@ dependencies = [
     "omegaconf==2.3.0",
     "hydra-core==1.3.2",
     "torch==2.2.0",
-    "tensordict==0.12.1",
+    "tensordict==0.12.0",
     "einops==0.7.0",
     "polars==0.20.18",
     "gymnasium>=0.29.0",
