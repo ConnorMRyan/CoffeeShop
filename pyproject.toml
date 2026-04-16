@@ -7,7 +7,7 @@ name = "coffeeshop"
 version = "0.1.0"
 description = "CoffeeShop Multi-Agent Reinforcement Learning Architecture"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
     "numpy==1.26.4",
     "pyyaml>=6.0",
@@ -37,7 +37,6 @@ dev = ["pytest", "pytest-cov", "bandit", "flake8"]
 all = [
     "overcooked-ai>=1.1.0",
     "pygame>=2.5.0",
-    "crafter>=1.8.0",
     "nle==0.9.1",
     "gfootball @ git+https://github.com/google-research/football.git"
 ]
@@ -47,6 +46,13 @@ coffeeshop-train = "coffeeshop.train:main"
 coffeeshop-evaluate = "coffeeshop.evaluate:evaluate"
 coffeeshop-eval = "coffeeshop.eval:main"
 coffeeshop-playback = "coffeeshop.playback:main"
+
+[tool.uv]
+managed = true
+package = true
+
+[dependency-groups]
+dev = ["pytest", "pytest-cov", "hypothesis", "bandit", "flake8"]
 
 [tool.setuptools.packages.find]
 where = ["."]

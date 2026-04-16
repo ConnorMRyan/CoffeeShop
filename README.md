@@ -18,7 +18,8 @@ Designed for research and rapid experimentation, CoffeeShop provides a unified A
 
 ## 🛠️ Stack & Requirements
 
-- **Language:** Python 3.9+
+- **Language:** Python 3.10+ (Recommended for `tensordict` compatibility)
+- **Package Manager:** [uv](https://github.com/astral-sh/uv) (Highly recommended for fast environment setup)
 - **Deep Learning:** [PyTorch](https://pytorch.org/) 2.2.0
 - **High Performance:** [Tensordict](https://github.com/pytorch/tensordict), [Einops](https://einops.rocks/), [Polars](https://pola.rs/)
 - **RL Ecosystem:** [Gymnasium](https://gymnasium.farama.org/), [Shimmy](https://shimmy.farama.org/)
@@ -31,23 +32,56 @@ Designed for research and rapid experimentation, CoffeeShop provides a unified A
 
 ## 🚀 Quick Start
 
-### 1. Installation
+### 1. Installation (Recommended: uv)
 
-Clone the repository and install dependencies:
+CoffeeShop uses `uv` for lightning-fast, reproducible environments.
 
 ```bash
+# Install uv if you haven't already
+powershell -c "irm https://astral-sh.uv.run/install.ps1 | iex" # Windows
+# curl -LsSf https://astral-sh.uv.run/install.sh | sh         # Linux/macOS
+
+# Clone the repository
 git clone https://github.com/ConnorMRyan/CoffeeShop.git
 cd CoffeeShop
+
+# Create virtualenv and sync dependencies
+uv sync
+```
+
+To run commands within the managed environment:
+
+```bash
+# Run training
+uv run python scripts/train.py env=overcooked agent=ppo
+
+# Run tests
+uv run pytest tests/
+```
+
+### 2. Legacy Installation (pip)
+
+If you prefer `pip`, ensure you are using **Python 3.10+**:
+
+```bash
+# Create and activate your own venv first, then:
 pip install -r requirements.txt
+pip install -e .
 ```
 
 To install all environment dependencies (Overcooked, Crafter, NetHack):
 
 ```bash
+# With uv
+uv sync --all-extras
+
+# With pip
 pip install ".[all]"
 ```
 
-### 2. Training a Population
+> **Note:** Some optional environments (like `crafter`) may face encoding issues during build on Windows. If `uv sync --all-extras` fails, install core dependencies first and then specific extras as needed.
+
+### 3. Training a Population
 
 The primary entry point is `scripts/train.py` (orchestrated via Hydra).
 
@@ -94,7 +128,8 @@ CoffeeShop/
 ├── tests/               # Core unit and integration tests (pytest + Hypothesis)
 ├── utils/               # Shared utilities (metrics, diversity analysis, factories)
 ├── pyproject.toml       # Package metadata and locked dependencies
-└── requirements.txt     # Version-locked core dependencies
+├── uv.lock              # Modern lockfile for reproducible environments
+└── requirements.txt     # Version-locked core dependencies (legacy)
 ```
 
 ---

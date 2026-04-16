@@ -1,5 +1,6 @@
 # ==============================================================================
-# CoffeeShop - Core Dependencies
+# CoffeeShop - Core Dependencies (Legacy)
+# Recommended: Use `uv sync` or `pip install -e .`
 # ==============================================================================
 
 # -- Core Utilities --
