@@ -5,7 +5,7 @@
 
 # -- Core Utilities --
 numpy==1.26.4
-scipy==1.10.0
+scipy==1.15.3
 polars==0.20.18
 pyyaml==6.0
 rich==13.7.0
