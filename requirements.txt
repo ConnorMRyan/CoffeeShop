@@ -30,7 +30,7 @@ einops==0.7.0
 
 # -- Reinforcement Learning Ecosystem (Env-Agnostic Glue) --
 gymnasium==0.29.0
-shimmy==1.3.0             # Gym API adapters
+shimmy==2.0.1             # Gym API adapters
 # pettingzoo>=1.24.0      # Optional: Uncomment if using standard MARL baseline APIs
 
 # -- Experiment Tracking --
