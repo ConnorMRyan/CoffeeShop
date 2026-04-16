@@ -31,14 +31,12 @@ dependencies = [
 overcooked = ["overcooked-ai>=1.1.0", "pygame>=2.5.0"]
 crafter = ["crafter>=1.8.0"]
 nethack = ["nle==0.9.1"]
-football = ["gfootball @ git+https://github.com/google-research/football.git"]
 test = ["pytest", "pytest-cov"]
 dev = ["pytest", "pytest-cov", "bandit", "flake8"]
 all = [
     "overcooked-ai>=1.1.0",
     "pygame>=2.5.0",
-    "nle==0.9.1",
-    "gfootball @ git+https://github.com/google-research/football.git"
+    "nle==0.9.1"
 ]
 
 [project.scripts]

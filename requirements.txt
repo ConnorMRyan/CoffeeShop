@@ -51,6 +51,3 @@ crafter>=1.8.0
 
 # -- NetHack Learning Environment (NLE) --
 nle==0.9.1              # Note: May require cmake and gcc/build-essential installed on OS
-
-# -- Google Research Football (Phase 2 Benchmark) --
-# gfootball @ git+https://github.com/google-research/football.git
