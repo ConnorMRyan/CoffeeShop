@@ -172,6 +172,20 @@ class NLESocialWrapper(SocialEnvWrapper):
     # ------------------------------------------------------------------
 
     @property
+    def obs_space(self) -> gym.Space:
+        """Returns the observation space. (API compatibility)"""
+        if hasattr(self, "_env") and self._env is not None:
+            return self._env.observation_space
+        return None
+
+    @property
+    def act_space(self) -> gym.Space:
+        """Returns the action space. (API compatibility)"""
+        if hasattr(self, "_env") and self._env is not None:
+            return self._env.action_space
+        return None
+
+    @property
     def agent_ids(self) -> List[str]:
         return self._agent_ids
 

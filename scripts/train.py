@@ -48,8 +48,8 @@ def make_env(name: str, params: Dict[str, Any], seed: Optional[int] = None) -> S
         from envs.crafter.wrapper import CrafterWrapper
         env = CrafterWrapper(**params)
     elif name == "nethack":
-        from envs.nethack.wrapper import NetHackWrapper
-        env = NetHackWrapper(**params)
+        from envs.nethack.wrapper import NLESocialWrapper
+        env = NLESocialWrapper(**params)
     elif name == "aisaac":
         from envs.aisaac.wrapper import AIsaacWrapper
         env = AIsaacWrapper(**params)
