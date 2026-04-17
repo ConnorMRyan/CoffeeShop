@@ -1,4 +1,4 @@
-# Mediator Config
+# CoffeeShopMediator Config
 buffer_capacity: 10000
 gamma: 0.99
 epsilon_td: 0.05

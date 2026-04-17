@@ -3,6 +3,7 @@
 
 import sys
 import os
+import pytest
 
 import importlib
 import traceback
@@ -16,11 +17,11 @@ def test_environment(env_name: str, module_path: str, class_name: str, kwargs: d
     try:
         module = importlib.import_module(module_path)
         WrapperClass = getattr(module, class_name)
-    except ImportError as e:
-        print(f"⚠️  Skipped: Wrapper or library not installed. ({e})")
+    except (ImportError, ModuleNotFoundError) as e:
+        pytest.skip(f"Skipped {env_name}: Wrapper or library not installed. ({e})")
         return
     except AttributeError:
-        print(f"⚠️  Skipped: Class '{class_name}' not found in {module_path}.")
+        pytest.skip(f"Skipped {env_name}: Class '{class_name}' not found in {module_path}.")
         return
 
     # 2. Run the pipeline tests
@@ -28,8 +29,8 @@ def test_environment(env_name: str, module_path: str, class_name: str, kwargs: d
         print("Initializing...")
         try:
             env = WrapperClass(**kwargs)
-        except ImportError as e:
-            print(f"⚠️  Skipped: Required library not installed. ({e})")
+        except (ImportError, ModuleNotFoundError) as e:
+            pytest.skip(f"Skipped {env_name}: Required library not installed. ({e})")
             return
 
         print(f"Agent IDs detected: {env.agent_ids}")

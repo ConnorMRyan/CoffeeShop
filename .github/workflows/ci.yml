@@ -1,39 +1,40 @@
-name: CI
+name: CI Pipeline
 
 on:
   push:
-    branches: [ master ]
+    branches: [ "master", "main" ]
   pull_request:
-    branches: [ master ]
+    branches: [ "master", "main" ]
+
+permissions:
+  contents: read
 
 jobs:
-  lint-and-smoke:
+  test:
+    name: Test (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Cache pip dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-
-      - name: Install core dependencies
+      - name: Install system dependencies for NetHack
         run: |
-          pip install --upgrade pip
-          pip install torch==2.2.0 numpy==1.26.4 scipy==1.10.0 omegaconf gymnasium shimmy pytest
+          sudo apt-get update
+          sudo apt-get install -y libbz2-dev
 
-      - name: Run tests
-        run: python -m pytest tests/ -x -q --tb=short
+      - name: Install uv and setup Python
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
 
-      - name: Placeholder import check
-        if: always()
-        run: python -c "import torch; import omegaconf; print('imports ok')"
+      - name: Install dependencies
+        run: uv sync --all-extras --locked
+
+      - name: Run tests (Pytest & Hypothesis)
+        run: uv run pytest tests/

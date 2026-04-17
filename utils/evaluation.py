@@ -25,26 +25,20 @@ class ActorFromCheckpoint:
             key_hints: Tuple[str, ...],
             device: str = "cpu"
     ):
-        from agents.ppo import ActorCriticNet
+        from agents.ppo import ActorCritic
         if not ckpt:
             raise ValueError("A checkpoint path is required.")
 
         self.device = torch.device(device)
-        data = Checkpointer().load(ckpt)
+        # Use weight_only=True for safety
+        data = torch.load(ckpt, map_location=self.device, weights_only=True)
 
-        meta = data.get("meta", {})
-        _obs_dim    = meta.get("obs_dim",    obs_dim)
-        _action_dim = meta.get("action_dim", action_dim)
-        _hidden     = meta.get("hidden",     512)
-        _encoder    = meta.get("encoder",    "cnn")
-        _img_shape  = meta.get("img_shape",  (3, 64, 64))
-
-        self.net = ActorCriticNet(
-            obs_dim    = _obs_dim,
-            action_dim = _action_dim,
-            hidden     = _hidden,
-            encoder    = _encoder,
-            img_shape  = _img_shape,
+        # ActorCritic is fixed to (obs_dim, action_dim, hidden_size)
+        # We'll use 64 as default hidden_size to match current models
+        self.net = ActorCritic(
+            obs_dim    = obs_dim,
+            act_dim    = action_dim,
+            hidden_size = 64
         ).to(self.device)
 
         state_dict = None
@@ -54,8 +48,12 @@ class ActorFromCheckpoint:
                 break
 
         if state_dict is None:
-            available = [k for k, v in data.items() if isinstance(v, dict)]
-            raise KeyError(f"Agent state not found in {ckpt}. Tried {key_hints}. Available: {available}")
+            # Fallback to general 'model' key if found
+            if "model" in data:
+                state_dict = data["model"]
+            else:
+                available = [k for k, v in data.items() if isinstance(v, dict)]
+                raise KeyError(f"Agent state not found in {ckpt}. Tried {key_hints}. Available: {available}")
 
         self.net.load_state_dict(state_dict, strict=False)
         self.net.eval()
@@ -65,7 +63,12 @@ class ActorFromCheckpoint:
         """Evaluation uses greedy actions."""
         if not isinstance(obs, torch.Tensor):
             obs = torch.as_tensor(obs, dtype=torch.float32)
-        logits, _ = self.net(obs.to(self.device).unsqueeze(0))
+        
+        # Ensure input is [batch, obs_dim]
+        if obs.ndim == 1:
+            obs = obs.unsqueeze(0)
+            
+        logits, _ = self.net(obs.to(self.device))
         return int(torch.argmax(logits, dim=-1).item())
 
 def run_episode(

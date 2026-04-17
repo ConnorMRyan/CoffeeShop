@@ -42,7 +42,7 @@ Sparse reward
 -------------
 NLE's reward is the per-step score delta — naturally sparse (mostly 0,
 positive on kills, item discoveries, etc.).  We surface it as both the
-dense reward and the sparse_reward in infos so the Mediator can treat
+dense reward and the sparse_reward in infos so the CoffeeShopMediator can treat
 score events as high-priority memories.
 """
 
@@ -240,7 +240,7 @@ class NLESocialWrapper(SocialEnvWrapper):
         # ── Reward decomposition ───────────────────────────────────────────
         # NLE's reward is the score delta per step — naturally sparse.
         # We expose it as both dense reward and sparse_reward so the
-        # Mediator treats positive score events as high-priority memories.
+        # CoffeeShopMediator treats positive score events as high-priority memories.
         sparse_reward = max(0.0, reward_f)   # only positive score events
 
         step_infos = {
@@ -277,18 +277,15 @@ class NLESocialWrapper(SocialEnvWrapper):
         """
         Flatten and normalise an NLE observation dict into a 1-D float32
         tensor of shape (obs_dim,).
-
-        Components
-        ----------
-        glyphs  : (21, 79) int16  → flattened, divided by MAX_GLYPH → float32
-        blstats : (27,)    int64  → divided per-field by _BLSTAT_SCALE,
-                                    clipped to [-5, 5] → float32
         """
-        glyphs = np.asarray(raw_obs["glyphs"], dtype=np.float32).reshape(-1)
+        from einops import rearrange
+        # Glyphs: (21, 79) int16 -> flattened float32
+        glyphs = torch.as_tensor(raw_obs["glyphs"], dtype=torch.float32)
+        glyphs = rearrange(glyphs, 'h w -> (h w)')
         glyphs /= self._max_glyph
 
-        blstats = np.asarray(raw_obs["blstats"], dtype=np.float32)
-        blstats = np.clip(blstats / _BLSTAT_SCALE, -5.0, 5.0)
+        # BLStats: (27,) int64 -> float32
+        blstats = torch.as_tensor(raw_obs["blstats"], dtype=torch.float32)
+        blstats = torch.clip(blstats / torch.as_tensor(_BLSTAT_SCALE, device=blstats.device), -5.0, 5.0)
 
-        combined = np.concatenate([glyphs, blstats], axis=0)
-        return torch.from_numpy(combined)
+        return torch.cat([glyphs, blstats], dim=0)

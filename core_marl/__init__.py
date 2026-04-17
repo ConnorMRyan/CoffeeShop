@@ -5,5 +5,13 @@ experience buffer, and associated glue to interface with env wrappers.
 """
 
 from .mediator import CoffeeShopMediator
+from .social_actor import SocialActor, SocialActorConfig
+from .experience_buffer import ExperienceBuffer, SharedExperienceBuffer
 
-__all__ = ["CoffeeShopMediator"]
+__all__ = [
+    "CoffeeShopMediator",
+    "SocialActor",
+    "SocialActorConfig",
+    "ExperienceBuffer",
+    "SharedExperienceBuffer"
+]

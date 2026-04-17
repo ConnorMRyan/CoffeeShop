@@ -1,0 +1,34 @@
+name: Dependabot uv Lock Sync
+
+on:
+  pull_request:
+    branches: [ "master", "main" ]
+
+permissions:
+  contents: write
+
+jobs:
+  update-lock:
+    # Only run if the PR was opened by Dependabot
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Use a token that allows triggering other workflows
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Update uv.lock
+        run: |
+          uv lock
+          if [ -n "$(git status --porcelain)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add uv.lock
+            git commit -m "chore: update uv.lock for dependabot"
+            git push
+          fi

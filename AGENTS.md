@@ -1,37 +1,112 @@
 # CoffeeShop AI Agent Guidelines
 
 ## Architecture Overview
-CoffeeShop is a modular multi-agent reinforcement learning (MARL) framework implementing Asynchronous Social Experience Sharing. Core components:
-- **SocialEnvWrapper** (`envs/base.py`): Abstract Base Class for environment wrappers; `reset()` and `step(actions)` return dicts keyed by `agent_id`. Subclasses must implement `get_global_obs()`.
-- **CoffeeShopMediator** (`core_marl/mediator.py`): Off-policy centralized critic. Manages peer experience sharing via `PrioritizedBuffer`.
-- **PrioritizedBuffer** (`core_marl/memory.py`): Stores `Transition` and `ScoredMemory` objects. Decoupled from mediator neural logic to handle sampling and priority weighting.
-- **PPOAgent** (`agents/ppo.py`): Fully implemented on-policy actor with ActorCriticNet (shared trunk + actor/critic heads), RolloutBuffer, GAE, PPO clip loss, and auxiliary behavior cloning (BC) loss.
-- **LearnedOpenness (ω)**: A per-agent `nn.Parameter` (logit-space) that controls the BC loss weight. Clamped to [0.05, 0.75].
-- **SocialActor** (`core_marl/social_actor.py`): Thin wrapper binding an agent to a global ID; delegates `act()`.
-- **VectorSocialRunner** (`utils/factory.py`): Manages N parallel `SocialEnvWrapper` instances. Global agent IDs are `env{e}_agent_{i}`.
-- **Metrics & Diversity** (`utils/metrics.py`): Handles population-wide logging, including the **Population Diversity Signal** (mean pairwise Jensen-Shannon divergence).
 
-Data flows: Env → VectorSocialRunner → PPOAgents (act/observe) → CoffeeShopMediator (push/broadcast) → BC loss.
+CoffeeShop is a modular multi-agent reinforcement learning (MARL) framework. Core components:
+
+- **SocialEnvWrapper**: Abstract base for env wrappers. `reset()` and `step(actions)` return dicts keyed by `agent_id` (e.g., `{"agent_0": obs, "agent_1": obs}`).
+- **CoffeeShopMediator**: Centralized experience broker. Manages the prioritized buffer, per-agent baseline filtering, Gossip Factor (η), and reward shaping. Lives in `core_marl/mediator.py`.
+- **SocialActor**: Binds an agent to an ID; delegates `act()` to the underlying agent policy.
+- **ExperienceBuffer**: Collects transitions as `ExperienceBatch` (lists of per-agent dicts). See `core_marl/experience_buffer.py`.
+
+Data flow: `Env → Mediator → SocialActors (act) → ExperienceBuffer → Mediator (share) → SocialActors (update)`
+
+---
 
 ## Key Patterns
-- **Multi-agent dicts**: All env/agent interactions use `{agent_id: value}` dicts. Example: `actions = {"env0_agent_0": 2, "env0_agent_1": 0}`.
-- **Hierarchical Configuration**: Uses `OmegaConf` for YAML configs. Configs are split into `agent`, `env`, `mediator`, and `trainer` (see `configs/`).
-- **PPOAgent API (act/observe split)**: Call `actor.act(env_id, obs, global_obs)` before the env step, then `actor.observe_outcome(next_global_obs, reward, sparse_reward, done, truncated)` after.
-- **Transition / RolloutBuffer**: `RolloutBuffer` uses a pending-step mechanism to ensure rewards are correctly paired with the causal actions.
-- **Logging**: Supports `TensorBoard` and `Weights & Biases` (`WandbWriter` in `utils/__init__.py`).
+
+- **Multi-agent dicts**: All env/agent interactions use `{agent_id: value}` dicts. Example: `actions = {"agent_0": "interact", "agent_1": "up"}`. Agent IDs must be consistent across all components.
+- **Lazy imports**: Optional deps (e.g., `overcooked-ai`) are imported only when needed. Raise `ImportError` with an install hint if missing.
+- **Stub agents**: `PPOAgent.act()` returns `{aid: None}` by default. Implement with real models/optimizers before running non-smoke experiments.
+- **Config loading**: Hydra manages all configuration (`conf/` directory). OmegaConf is the config backend. Override via CLI: `python scripts/train.py env=overcooked agent=ppo`.
+- **Logging**: Hydra writes logs to its output directory. Metrics are exported to Parquet via `Polars`.
+- **MARL tensors**: Use `tensordict` for rollout data and `einops` for dimension manipulation throughout.
+
+---
+
+## Mediator Internals
+
+If modifying `core_marl/`, be aware of these mechanisms:
+
+- **Priority buffer**: Fixed-capacity min-heap retaining highest-priority trajectories across population history. Backed by `core_marl/experience_buffer.py`.
+- **Per-agent baseline filtering**: At query time, trajectories with reward below the requesting agent's current rolling average are excluded. This prevents expert agents regressing on novice data.
+- **Learned Openness (ω)**: Each agent holds a logit-space parameter ω ∈ [0.05, 0.75] gating receptivity to Mediator-provided trajectories. Driven by internal value-network variance — do not confuse with a behavioural cloning weight.
+- **Gossip Factor (η)**: When population rolling average drops below 70% of All-Time Best, η scales down effective ω for all agents, suppressing sharing during collective regression.
+
+---
 
 ## Workflows
-- **Training**: `python coffeeshop/train.py env=overcooked env.layout=cramped_room trainer.total_steps=2000000`. CLI overrides use dot-notation for nested YAML fields.
-- **Cross-play Evaluation**: `python coffeeshop/eval.py --env <env> --ckpt_a <path> --ckpt_b <path> --episodes 5`. For overcooked, add --layout <layout>. Uses `ActorFromCheckpoint` and `run_episode` from `utils/evaluation.py`. For 2-agent environments like crafter, use `python coffeeshop/eval.py --env crafter --ckpt_a <path> --ckpt_b <path> --episodes 5`.
-- **Playback**: `python coffeeshop/playback.py <checkpoint.pt> --output out.gif --layout cramped_room`. Renders saved checkpoints to GIF. (Overcooked only)
-- **Adding Envs**: Implement `SocialEnvWrapper` subclass in `envs/{name}/wrapper.py`; register in `make_env` (`utils/factory.py`).
-- **Implementing Agents**: Extend `agents/{agent}.py`; wire to PyTorch models; use `RolloutBuffer`.
-- **Checkpointing**: `Checkpointer(dirpath, run_id).save(state_dict)` saves under `checkpoints/{run_id}/`. Keys include `env{e}_agent_{i}`, `mediator`, and `step`.
 
-## Conventions
-- **Agent IDs**: Local wrappers use `["agent_0", "agent_1"]`; `VectorSocialRunner` promotes these to global IDs `env{e}_agent_{i}`.
-- **Reward Shaping**: `team_reward / N_agents + shaped_reward * shaping_factor`.
-- **Termination vs Truncation**: Strictly distinguished for GAE bootstrapping. `truncated=True` triggers V(s') bootstrapping; `terminated=True` does not.
-- **Population Diversity**: Calculated using JS divergence on a shared probe batch sampled from the `Mediator`.
+### Training
+```bash
+# Single process
+python scripts/train.py env=overcooked agent=ppo run.steps=1000
 
-Reference: `core_marl/`, `utils/factory.py`, `utils/evaluation.py`, `agents/ppo.py`, `coffeeshop/train.py`, `configs/`, `ARCHITECTURE.md`.
+# Distributed (Linux/macOS only)
+torchrun --nproc_per_node=2 scripts/train.py env=overcooked agent=ppo run.steps=1000
+```
+
+### Evaluation
+```bash
+python scripts/evaluate.py --help   # canonical evaluation entry point
+```
+
+### Testing
+Always run the test suite after making changes:
+```bash
+# With uv (canonical)
+uv run pytest tests/
+
+# With pip
+pytest tests/
+```
+
+Key tests:
+- `tests/test_invariants.py` — property-based buffer integrity tests (Hypothesis)
+- `tests/test_experience_buffer.py` — experience collection and sampling logic
+
+---
+
+## Adding Environments
+
+1. Implement `SocialEnvWrapper` subclass in `envs/{env_name}/wrapper.py`.
+2. Ensure `reset()` and `step()` return dicts keyed by `agent_id`.
+3. Register via `make_env()` in `utils/factory.py` — this is the single canonical registration point.
+
+## Implementing Agents
+
+1. Extend `agents/{agent}.py`.
+2. Implement `act()` and `update()`.
+3. Use `TensorDict` for rollout data and `einops` for tensor manipulation.
+4. Use `ExperienceBuffer.export()` for batching transitions.
+
+## Checkpointing
+
+Use `utils/checkpointing.py` for all checkpoint save/load operations — do not call `torch.save` directly. This ensures consistent state_dict handling across distributed runs.
+
+---
+
+## Dependency Management
+
+`uv` is the canonical package manager. `uv.lock` is the authoritative lockfile. `requirements.txt` is provided for legacy pip compatibility only.
+
+```bash
+uv sync              # install core deps
+uv sync --all-extras # include all optional envs (Overcooked, Crafter, NetHack, etc.)
+```
+
+---
+
+## Reference
+
+| Concern | Location |
+|---|---|
+| Mediator & buffer logic | `core_marl/` |
+| Agent policies | `agents/` |
+| Environment wrappers | `envs/` |
+| Config schemas | `conf/` |
+| Training entry point | `scripts/train.py` |
+| Evaluation entry point | `scripts/evaluate.py` |
+| Env/agent registration | `utils/factory.py` |
+| Metrics & JS divergence | `utils/metrics.py` |
+| Checkpointing | `utils/checkpointing.py` |

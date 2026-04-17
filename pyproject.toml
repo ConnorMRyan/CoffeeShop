@@ -3,20 +3,24 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "coffeeshop"
+name = "coffeeshop-marl"
 version = "0.1.0"
 description = "CoffeeShop Multi-Agent Reinforcement Learning Architecture"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
-    "numpy>=1.24.0,<2.0.0",
-    "pyyaml>=6.0",
+    "numpy>=1.26.4",
+    "pyyaml>=6.0.1",
     "rich>=13.7.0",
     "loguru>=0.7.0",
     "packaging>=24.0",
     "tqdm>=4.66.0",
     "omegaconf>=2.3.0",
-    "torch>=2.2.0",
+    "hydra-core>=1.3.2",
+    "torch==2.2.0",
+    "tensordict==0.12.1",
+    "einops==0.7.0",
+    "polars>=0.20.18",
     "gymnasium>=0.29.0",
     "shimmy>=1.3.0",
     "tensorboard>=2.15.0",
@@ -26,22 +30,25 @@ dependencies = [
 [project.optional-dependencies]
 overcooked = ["overcooked-ai>=1.1.0", "pygame>=2.5.0"]
 crafter = ["crafter>=1.8.0"]
-nethack = ["nle==0.9.1"]
-football = ["gfootball @ git+https://github.com/google-research/football.git"]
-test = ["pytest", "pytest-cov"]
-dev = ["pytest", "pytest-cov", "bandit", "flake8"]
+# nle requires Python <=3.11 and OS-level build deps (cmake, gcc).
+# Install manually: pip install nle>=0.9.1
+nethack = ["nle>=0.9.1"]
 all = [
     "overcooked-ai>=1.1.0",
     "pygame>=2.5.0",
-    "crafter>=1.8.0",
-    "nle==0.9.1",
-    "gfootball @ git+https://github.com/google-research/football.git"
 ]
 
 [project.scripts]
 coffeeshop-train = "coffeeshop.train:main"
-coffeeshop-eval = "coffeeshop.eval:main"
+coffeeshop-evaluate = "coffeeshop.evaluate:evaluate"
 coffeeshop-playback = "coffeeshop.playback:main"
+
+[tool.uv]
+managed = true
+package = true
+
+[dependency-groups]
+dev = ["pytest", "pytest-cov", "hypothesis", "bandit", "flake8"]
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -50,10 +57,20 @@ include = ["agents*", "core_marl*", "envs*", "utils*", "models*", "coffeeshop*"]
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+addopts = "--cov=. --cov-report=term-missing --cov-fail-under=9"
 
-[tool.ruff]
-target-version = "py312"
-line-length = 100
-select = ["E", "F", "I"]
-ignore = ["E501", "F841"]
-exclude = ["__pycache__", ".venv", "build", "data"]
+[tool.coverage.run]
+omit = [
+    "scripts/*",
+    "tests/*",
+    "parity_check.py",
+    "*/__init__.py"
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError"
+]

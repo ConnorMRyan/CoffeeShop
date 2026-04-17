@@ -1,557 +1,262 @@
 from __future__ import annotations
 
-import math
-from collections import deque
-from typing import List, Optional, Tuple
+import collections
+from dataclasses import dataclass
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
-import threading
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.distributions import Categorical
+from tensordict import TensorDict, MemoryMappedTensor
 
-from core_marl.memory import Transition, ScoredMemory
-from core_marl.mediator import CoffeeShopMediator
-from models.common import NatureCNN
+@dataclass
+class PPOConfig:
+    lr: float = 3e-4
+    gamma: float = 0.99
+    lam: float = 0.95
+    clip_ratio: float = 0.2
+    entropy_coef: float = 0.01
+    value_coef: float = 0.5
+    update_epochs: int = 4
+    minibatch_size: int = 64
+    hidden_size: int = 64
 
-
-# ---------------------------------------------------------------------------
-# Actor-Critic Network
-# ---------------------------------------------------------------------------
-
-class ActorCriticNet(nn.Module):
-    """
-    Shared-trunk actor-critic network.
-    """
-
-    def __init__(
-            self,
-            obs_dim:    int,
-            action_dim: int,
-            hidden:     int                              = 128,
-            encoder:    str                              = "mlp",
-            img_shape:  Optional[Tuple[int, int, int]]  = None,
-    ):
+class ActorCritic(nn.Module):
+    def __init__(self, obs_dim: int, act_dim: int, hidden_size: int):
         super().__init__()
-        self._encoder_type = encoder
-        self._img_shape    = img_shape
+        self.actor = nn.Sequential(
+            nn.Linear(obs_dim, hidden_size),
+            nn.Tanh(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.Tanh(),
+            nn.Linear(hidden_size, act_dim)
+        )
+        self.critic = nn.Sequential(
+            nn.Linear(obs_dim, hidden_size),
+            nn.Tanh(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.Tanh(),
+            nn.Linear(hidden_size, 1)
+        )
 
-        if encoder == "cnn":
-            if img_shape is None:
-                raise ValueError("img_shape=(C,H,W) is required when encoder='cnn'")
-            C, H, W = img_shape
-            self.cnn = NatureCNN(C, H, W)
-            cnn_out = self.cnn.output_dim
-            self.trunk = nn.Sequential(
-                self.cnn,
-                nn.Linear(cnn_out, hidden),
-                nn.LayerNorm(hidden),
-                nn.Tanh(),
-            )
-        else:
-            self.trunk = nn.Sequential(
-                nn.Linear(obs_dim, hidden),
-                nn.LayerNorm(hidden),
-                nn.Tanh(),
-                nn.Linear(hidden, hidden),
-                nn.Tanh(),
-            )
-
-        self.actor_head  = nn.Linear(hidden, action_dim)
-        self.critic_head = nn.Linear(hidden, 1)
-
-    def forward(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        # obs: [B, C, H, W] if CNN, [B, D] if MLP
-        h      = self.trunk(obs)                  # [B, hidden]
-        logits = self.actor_head(h)               # [B, action_dim]
-        value  = self.critic_head(h).squeeze(-1)  # [B]
-        return logits, value
-
-    def act(self, obs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        # obs: [1, C, H, W] or [1, D]
-        logits, value = self(obs)                 # logits: [1, action_dim], value: [1]
-        dist          = Categorical(logits=logits)
-        action        = dist.sample()             # [1]
-        log_prob      = dist.log_prob(action)     # [1]
-        return action, log_prob, value
-
-
-
-
-# ---------------------------------------------------------------------------
-# Learned Openness (ω)
-# ---------------------------------------------------------------------------
-
-class LearnedOpenness(nn.Module):
-    def __init__(self, init_omega: float = 0.5):
-        super().__init__()
-        # Clamp init_omega to avoid log(0) or division by zero
-        init_omega = max(min(init_omega, 0.999), 0.001)
-        self._raw = nn.Parameter(torch.tensor(math.log(init_omega / (1 - init_omega))))
-
-    @property
-    def value(self) -> float:
-        return torch.sigmoid(self._raw).item()
-
-    def forward(self) -> torch.Tensor:
-        return torch.sigmoid(self._raw)
-
-    def force_reset(self):
-        """Reset omega to 0.5 to force social listening."""
-        with torch.no_grad():
-            self._raw.fill_(0.0)
-
-    def update_from_variance(
-            self,
-            value_variance:        float,
-            critic_loss:           float = 0.0,
-            critic_loss_threshold: float = 2.0,
-            lr:                    float = 0.01,
-            high_var_threshold:    float = 0.05,
-    ) -> None:
-        """
-        Adjust omega based on value variance and mediator critic quality.
-
-        Quality scales the upward nudge:
-          critic_loss == 0         → quality 1.0, full upward nudge
-          critic_loss >= threshold → quality 0.0, no upward nudge
-
-        Downward nudge is unscaled: omega always closes freely when
-        value_variance is low.
-        """
-        with torch.no_grad():
-            quality = max(0.0, 1.0 - critic_loss / max(critic_loss_threshold, 1e-8))
-            # Hardening: check for NaN/Inf in quality
-            if not math.isfinite(quality):
-                quality = 0.0
-
-            if value_variance > high_var_threshold:
-                self._raw.add_(lr * quality)
-            else:
-                self._raw.sub_(lr)
-            # clamp: [logit(0.05), logit(0.75)]
-            self._raw.clamp_(-2.944, 1.0986)
-
-
-# ---------------------------------------------------------------------------
-# Rollout Buffer
-# ---------------------------------------------------------------------------
+    def forward(self, obs: torch.Tensor) -> Tuple[Categorical, torch.Tensor]:
+        logits = self.actor(obs)
+        dist = Categorical(logits=logits)
+        value = self.critic(obs)
+        return dist, value
 
 class RolloutBuffer:
-    def __init__(self):
-        self.env_ids:         List[int]          = []
-        self.obs:             List[torch.Tensor] = []
-        self.global_obs:      List[torch.Tensor] = []
-        self.next_global_obs: List[torch.Tensor] = []
-        self.actions:         List[torch.Tensor] = []
-        self.log_probs:       List[torch.Tensor] = []
-        self.rewards:         List[float]        = []
-        self.sparse_rewards:  List[float]        = []
-        self.values:          List[float]        = []
-        self.dones:           List[bool]         = []
-        self.truncateds:      List[bool]         = []
-        self._last_val:       float              = 0.0
+    def __init__(self, capacity: int = 2048, obs_shape: tuple = (96,), act_dim: int = 1):
+        self.capacity = capacity
+        # Use MemoryMappedTensor for high-throughput zero-copy sharing
+        self.data = TensorDict({
+            "obs": MemoryMappedTensor.empty((capacity, *obs_shape), dtype=torch.float32),
+            "act": MemoryMappedTensor.empty((capacity,), dtype=torch.long),
+            "rew": MemoryMappedTensor.empty((capacity,), dtype=torch.float32),
+            "val": MemoryMappedTensor.empty((capacity,), dtype=torch.float32),
+            "logp": MemoryMappedTensor.empty((capacity,), dtype=torch.float32),
+            "term": MemoryMappedTensor.empty((capacity,), dtype=torch.bool),
+        }, batch_size=[capacity])
+        self.ptr = 0
 
-        self._pending: Optional[tuple] = None
-        self._lock = threading.Lock()
+    def store(self, obs, act, reward, val, logp, terminal):
+        if self.ptr >= self.capacity:
+            return # Full
+        self.data["obs"][self.ptr] = torch.as_tensor(obs)
+        self.data["act"][self.ptr] = torch.as_tensor(act)
+        self.data["rew"][self.ptr] = torch.as_tensor(reward)
+        self.data["val"][self.ptr] = torch.as_tensor(val)
+        self.data["logp"][self.ptr] = torch.as_tensor(logp)
+        self.data["term"][self.ptr] = torch.as_tensor(terminal)
+        self.ptr += 1
 
-    def record_action(
-            self,
-            env_id:     int,
-            obs:        torch.Tensor,
-            global_obs: torch.Tensor,
-            action:     torch.Tensor,
-            log_prob:   torch.Tensor,
-            value:      float,
-    ) -> None:
-        with self._lock:
-            self._pending = (env_id, obs, global_obs, action, log_prob, value)
-
-    def record_outcome(
-            self,
-            next_global_obs: torch.Tensor,
-            reward:          float,
-            sparse_reward:   float,
-            done:            bool,
-            truncated:       bool,
-    ) -> None:
-        with self._lock:
-            if self._pending is None:
-                # In a multi-threaded env, this might happen if two threads
-                # call record_outcome without their own record_action first.
-                return
+    def get(self, gamma=0.99, lam=0.95, last_val=0.0):
+        # Slice the valid data
+        valid_data = self.data[:self.ptr]
+        
+        # Compute GAE and returns
+        rews = valid_data["rew"].numpy()
+        vals = np.append(valid_data["val"].numpy(), last_val)
+        terms = valid_data["term"].numpy()
+        
+        adv = np.zeros_like(rews)
+        last_gae = 0
+        for t in reversed(range(self.ptr)):
+            delta = rews[t] + gamma * vals[t+1] * (1 - terms[t]) - vals[t]
+            adv[t] = last_gae = delta + gamma * lam * (1 - terms[t]) * last_gae
             
-            env_id, obs, global_obs, action, log_prob, value = self._pending
-            self._pending = None
-
-            self.env_ids.append(env_id)
-            self.obs.append(obs)
-            self.global_obs.append(global_obs)
-            self.next_global_obs.append(next_global_obs)
-            self.actions.append(action)
-            self.log_probs.append(log_prob)
-            self.rewards.append(reward)
-            self.sparse_rewards.append(sparse_reward)
-            self.values.append(value)
-            self.dones.append(done)
-            self.truncateds.append(truncated)
-
-    def to_transitions(self, agent_id: str) -> List[Transition]:
-        with self._lock:
-            return [
-                Transition(
-                    agent_id        = agent_id,
-                    env_id          = eid,
-                    obs             = o,
-                    global_obs      = g,
-                    next_global_obs = ng,
-                    action          = a,
-                    log_prob        = lp,
-                    reward          = r,
-                    sparse_reward   = sr,
-                    value_est       = v,
-                    done            = d,
-                    truncated       = tr,
-                )
-                for eid, o, g, ng, a, lp, r, sr, v, d, tr in zip(
-                    self.env_ids, self.obs, self.global_obs, self.next_global_obs,
-                    self.actions, self.log_probs, self.rewards, self.sparse_rewards,
-                    self.values, self.dones, self.truncateds,
-                )
-            ]
-
-    def get(self, last_val: float = 0.0) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Convert buffer content to stacked tensors/arrays for training."""
-        with self._lock:
-            if not self.rewards:
-                # Return empty structures if buffer is empty
-                return (
-                    torch.empty(0), torch.empty(0), torch.empty(0),
-                    np.empty(0), np.empty(0), np.empty(0), np.empty(0), np.empty(0)
-                )
-
-            obs_t         = torch.stack(self.obs)
-            actions_t     = torch.stack(self.actions)
-            log_probs_t   = torch.stack(self.log_probs)
-            
-            vals          = np.array(self.values + [last_val])
-            rewards       = np.array(self.rewards)
-            sparse        = np.array(self.sparse_rewards)
-            dones         = np.array(self.dones)
-            truncateds    = np.array(self.truncateds)
-
-            return obs_t, actions_t, log_probs_t, vals, rewards, sparse, dones, truncateds
-
-    def __len__(self) -> int:
-        with self._lock:
-            return len(self.rewards)
+        ret = adv + vals[:-1]
+        
+        data = {
+            'obs': valid_data["obs"].clone(), # Clone to ensure it's not MM anymore when passed to training
+            'act': valid_data["act"].clone(),
+            'ret': torch.as_tensor(ret, dtype=torch.float32),
+            'adv': torch.as_tensor(adv, dtype=torch.float32),
+            'logp': valid_data["logp"].clone()
+        }
+        self.clear()
+        return data
 
     def clear(self):
-        with self._lock:
-            self.env_ids.clear()
-            self.obs.clear()
-            self.global_obs.clear()
-            self.next_global_obs.clear()
-            self.actions.clear()
-            self.log_probs.clear()
-            self.rewards.clear()
-            self.sparse_rewards.clear()
-            self.values.clear()
-            self.dones.clear()
-            self.truncateds.clear()
-            self._last_val = 0.0
-            self._pending = None
+        self.ptr = 0
 
-
-# ---------------------------------------------------------------------------
-# PPOAgent
-# ---------------------------------------------------------------------------
+    def __len__(self):
+        return self.ptr
 
 class PPOAgent:
-    def __init__(
-            self,
-            agent_id:        str,
-            obs_space:       Optional[int],
-            act_space:       Optional[int],
-            global_obs_dim:  int,
-            mediator:        CoffeeShopMediator,
-            gamma:           float = 0.99,
-            lam:             float = 0.95,
-            clip_eps:        float = 0.2,
-            c_vf:            float = 0.5,
-            c_ent:           float = 0.05,
-            ppo_epochs:      int   = 4,
-            mini_batch_size: int   = 64,
-            lr:              float = 3e-4,
-            push_every:      int   = 128,
-            pull_every:      int   = 2,
-            hidden:          int   = 128,
-            encoder:         str   = "mlp",
-            img_shape:       Optional[Tuple[int, int, int]] = None,
-            device:          str   = "cpu",
-            vanilla:         bool  = False,
-    ):
-        if obs_space is None:
-            raise ValueError("obs_space is None; cannot initialize PPOAgent without state dimensions.")
-        if act_space is None:
-            raise ValueError("act_space is None; cannot initialize PPOAgent without action dimensions.")
+    """PyTorch PPO agent."""
 
-        self.agent_id        = agent_id
-        self.gamma           = gamma
-        self.lam             = lam
-        self.clip_eps        = clip_eps
-        self.c_vf            = c_vf
-        self.base_c_ent      = c_ent
-        self.ppo_epochs      = ppo_epochs
-        self.mini_batch_size = mini_batch_size
-        self.push_every      = push_every
-        self.pull_every      = pull_every
-        self.device          = torch.device(device)
-        self.vanilla         = vanilla
-
-        self.model    = ActorCriticNet(
-            obs_space, act_space,
-            hidden    = hidden,
-            encoder   = encoder,
-            img_shape = img_shape,
-        ).to(self.device)
-        self.ac        = self.model  # Backward compatibility alias
-        self.openness  = LearnedOpenness(init_omega=0.5)
-        # Vanilla mode: optimizer covers only the actor-critic network.
-        # Social mode: also includes openness so ω is learned end-to-end.
-        opt_params = (
-            self.model.parameters() if vanilla
-            else list(self.model.parameters()) + list(self.openness.parameters())
-        )
-        self.optimizer = torch.optim.Adam(opt_params, lr=lr, eps=1e-5)
-
-        self.mediator      = mediator
-        self.buffer        = RolloutBuffer()
-        self._step_count   = 0
-        self._update_count = 0
-
-        self._variance_history: deque[float] = deque(maxlen=50)
-
-        self._last_critic_loss: float = 1.0
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
-    def act(
-            self,
-            env_id:     int,
-            obs:        torch.Tensor,
-            global_obs: torch.Tensor,
-            deterministic: bool = False,
-    ) -> torch.Tensor:
-        # Tensors are now moved to device in the training loop for batching performance
-        with torch.no_grad():
-            logits, value = self.model(obs)
-            dist          = Categorical(logits=logits)
-            if deterministic:
-                action = logits.argmax(dim=-1)
-            else:
-                action = dist.sample()
-            log_prob = dist.log_prob(action)
-
-        self.buffer.record_action(env_id, obs, global_obs, action, log_prob, value.item())
-        return action
-
-    def observe_outcome(
-            self,
-            next_global_obs: torch.Tensor,
-            reward:          float,
-            sparse_reward:   float,
-            done:            bool,
-            truncated:       bool,
-    ) -> None:
-        # Tensors are now moved to device in the training loop for batching performance
-        self.buffer.record_outcome(next_global_obs, reward, sparse_reward, done, truncated)
-
-        self._step_count += 1
-        if not self.vanilla and self._step_count % self.push_every == 0:
-            self._push_to_mediator()
-
-    def update(self, last_obs: Optional[torch.Tensor] = None) -> dict:
-        last_value = self.buffer._last_val
-        if last_obs is not None:
-            with torch.no_grad():
-                _, last_val_t = self.model(last_obs.to(self.device).unsqueeze(0))
-                last_value = last_val_t.item()
-
-        obs_t, actions_t, old_lp_t, values_np, rewards_np, sparse_np, dones_np, truncated_np = self.buffer.get(last_val=last_value)
+    def __init__(self, obs_space: Any | None = None, act_space: Any | None = None, config: PPOConfig | None = None) -> None:
+        self.obs_space = obs_space
+        self.act_space = act_space
+        self.config = config or PPOConfig()
         
-        if len(rewards_np) == 0:
-            return {}
+        # Require valid spaces — fail fast rather than silently building wrong-shaped networks
+        if self.obs_space is None or not hasattr(self.obs_space, "shape"):
+            raise ValueError(
+                "PPOAgent requires obs_space with a .shape attribute. "
+                "Pass env.obs_space when constructing the agent."
+            )
+        if self.act_space is None or not hasattr(self.act_space, "n"):
+            raise ValueError(
+                "PPOAgent requires act_space with a .n attribute (discrete action count). "
+                "Pass env.act_space when constructing the agent."
+            )
+        obs_dim = int(np.prod(self.obs_space.shape))
+        act_dim = self.act_space.n
 
-        obs_t    = obs_t.to(self.device).detach()
-        actions_t = actions_t.to(self.device).detach()
-        old_lp_t = old_lp_t.to(self.device).detach()
-
-        advantages, returns = self._compute_gae(
-            values_np, rewards_np, dones_np, truncated_np, last_value,
-        )
-        advantages_t = torch.tensor(advantages, dtype=torch.float32, device=self.device)
-        returns_t    = torch.tensor(returns,    dtype=torch.float32, device=self.device)
-
-        # Hardening: handle NaN/Inf in advantages/returns
-        if not torch.isfinite(advantages_t).all():
-            advantages_t = torch.nan_to_num(advantages_t, nan=0.0, posinf=0.0, neginf=0.0)
-        if not torch.isfinite(returns_t).all():
-            returns_t = torch.nan_to_num(returns_t, nan=0.0, posinf=0.0, neginf=0.0)
-
-        advantages_t = (advantages_t - advantages_t.mean()) / (advantages_t.std(unbiased=False) + 1e-8)
-
-        value_variance = float(np.var(values_np))
-        if not math.isfinite(value_variance):
-            value_variance = 0.0
-        self._variance_history.append(value_variance)
-
-        if self.vanilla:
-            # Pure PPO: no social updates, no openness, no peer memories.
-            pass
-        else:
-            no_delivery     = np.sum(sparse_np) <= 0
-            genuinely_stuck = value_variance < 1e-4
-            if no_delivery and genuinely_stuck:
-                self.openness.force_reset()
-            else:
-                self.openness.update_from_variance(
-                    value_variance,
-                    critic_loss=self._last_critic_loss,
-                )
-
-        current_c_ent = self.base_c_ent
-        if len(self._variance_history) >= 10:
-            median_var = float(np.median(self._variance_history))
-            threshold  = max(1e-8, 0.1 * median_var)
-            if value_variance < threshold:
-                current_c_ent *= 3.0
-
-        peer_memories  = []
-        critic_quality = 1.0
-        if not self.vanilla:
-            if self._update_count % self.pull_every == 0:
-                peer_memories = self.mediator.broadcast(self.agent_id, self.openness.value)
-            
-            # Using mediator's gossip factor as a proxy for Q if we want local sensitivity.
-            critic_quality = self.mediator.get_verifiable_trust(getattr(self, "_last_critic_loss", 1.0))
-
-        n   = len(rewards_np)
-        idx = np.arange(n)
-        metrics: dict = {
-            "policy_loss": [], "value_loss": [], "entropy": [],
-            "grad_norm": []
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model = ActorCritic(obs_dim, act_dim, self.config.hidden_size).to(self.device)
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.config.lr)
+        
+        # Buffer per agent_id for shared weight models
+        obs_shape = obs_space.shape if hasattr(obs_space, "shape") else (96,)
+        self.buffers: Dict[str, RolloutBuffer] = {
+            aid: RolloutBuffer(capacity=4096, obs_shape=obs_shape) 
+            for aid in ["agent_0", "agent_1"]
         }
-        if not self.vanilla:
-            metrics["bc_loss"]        = []
-            metrics["critic_quality"] = []
 
-        for _ in range(self.ppo_epochs):
-            np.random.shuffle(idx)
-            for start in range(0, n, self.mini_batch_size):
-                mb = idx[start : start + self.mini_batch_size]
-                if len(mb) == 0:
-                    continue
+    def act(self, obs: Dict[str, Any], deterministic: bool = False) -> Dict[str, Any]:
+        """Return actions per agent_id."""
+        actions = {}
+        for aid, single_obs in obs.items():
+            # Ensure we are not creating new tensors on CPU and then moving to GPU in a loop
+            # single_obs is typically a numpy array from the wrapper
+            o = torch.as_tensor(single_obs, dtype=torch.float32, device=self.device)
+            with torch.no_grad():
+                dist, val = self.model(o)
+                a = dist.sample() if not deterministic else dist.probs.argmax(dim=-1)
+                logp = dist.log_prob(a)
+            # Keep logp and val as floats to avoid tensor overhead in the dict if they are single values
+            actions[aid] = {"action": a.item(), "val": val.item(), "logp": logp.item()}
+        return actions
 
-                logits, values = self.model(obs_t[mb])
-                dist           = Categorical(logits=logits)
-                new_log_probs  = dist.log_prob(actions_t[mb])
-                entropy        = dist.entropy().mean()
+    def get_action_dist(self, obs: Dict[str, Any]) -> Dict[str, Any]:
+        """Get the action distribution for the given observation."""
+        dists = {}
+        for aid, single_obs in obs.items():
+            o = torch.as_tensor(single_obs, dtype=torch.float32, device=self.device)
+            with torch.no_grad():
+                dist, _ = self.model(o)
+                dists[aid] = dist.probs.cpu().numpy()
+        return dists
 
-                ratio  = torch.exp(new_log_probs - old_lp_t[mb].detach())
-                surr1  = ratio * advantages_t[mb]
-                surr2  = torch.clamp(ratio, 1.0 - self.clip_eps, 1.0 + self.clip_eps) * advantages_t[mb]
-                L_clip = -torch.min(surr1, surr2).mean()
-                L_vf   = F.mse_loss(values, returns_t[mb])
+    def store_transition(self, aid: str, obs: Any, act: int, reward: float, val: float, logp: float, terminal: bool):
+        if aid not in self.buffers:
+            # Dynamically add buffer if new agent encountered (unlikely in this repo but good for robustness)
+            obs_shape = obs.shape if hasattr(obs, "shape") else (96,)
+            self.buffers[aid] = RolloutBuffer(capacity=4096, obs_shape=obs_shape)
+        self.buffers[aid].store(obs, act, reward, val, logp, terminal)
 
-                if self.vanilla:
-                    L_total = L_clip + self.c_vf * L_vf - current_c_ent * entropy
-                    clip_params = list(self.model.parameters())
-                else:
-                    L_bc            = self._behavior_cloning_loss(peer_memories)
-                    omega_mask      = self.mediator.get_omega_mask(self.agent_id)
-                    effective_omega = self.openness() * omega_mask
-                    # critic_quality gates mediator influence.
-                    L_total = (
-                            L_clip
-                            + self.c_vf * L_vf
-                            - current_c_ent * entropy
-                            + effective_omega * critic_quality * L_bc
-                    )
-                    clip_params = list(self.model.parameters()) + list(self.openness.parameters())
+    def behavior_cloning_update(self, aid: str, obs_batch: torch.Tensor, act_batch: torch.Tensor, omega: Any) -> float:
+        """Perform auxiliary distillation update."""
+        # Assume tensors are already on the correct device and float/long
+        
+        # Simple BC: maximize log_prob of given actions
+        # No optimizer.zero_grad() here because SocialActor might be calling this 
+        # and it might want to accumulate gradients if omega is learnable.
+        dist, _ = self.model(obs_batch)
+        logp = dist.log_prob(act_batch)
+        
+        # Loss modulated by omega. If omega is a tensor, this maintains the graph.
+        loss = -(logp.mean() * omega)
+        loss.backward()
+        # No optimizer.step() here, SocialActor or train.py handles it.
+        
+        return loss.item()
 
-                self.optimizer.zero_grad(set_to_none=True)
-                L_total.backward()
-
-                # Robust gradient clipping on the model parameters as per architect instructions
-                grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5)
-                metrics["grad_norm"].append(grad_norm.item())
-                self.optimizer.step()
-
-                metrics["policy_loss"].append(L_clip.item())
-                metrics["value_loss"].append(L_vf.item())
-                metrics["entropy"].append(entropy.item())
-                if not self.vanilla:
-                    metrics["bc_loss"].append(L_bc.item())
-                    metrics["critic_quality"].append(critic_quality)
-
-        self.buffer.clear()
-        self._update_count += 1
-        return (
-                {k: float(np.mean(v)) for k, v in metrics.items()}
-                | {"omega": self.openness.value, "value_variance": value_variance}
-        )
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _behavior_cloning_loss(self, peer_memories: List[ScoredMemory]) -> torch.Tensor:
-        if not peer_memories:
-            return torch.zeros(1, device=self.device).squeeze()
-
-        priorities   = torch.tensor([m.priority for m in peer_memories], dtype=torch.float32)
-        weights      = F.softmax(priorities, dim=0).to(self.device)
-        peer_obs     = torch.stack([m.transition.obs    for m in peer_memories]).to(self.device)
-        peer_actions = torch.stack([m.transition.action for m in peer_memories]).to(self.device)
-        logits, _    = self.model(peer_obs)
-        return -(weights * Categorical(logits=logits).log_prob(peer_actions)).sum()
-
-    def _compute_gae(
-            self,
-            values:     np.ndarray,
-            rewards:    np.ndarray,
-            dones:      np.ndarray,
-            truncateds: np.ndarray,
-            last_value: float = 0.0,
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        n          = len(rewards)
-        advantages = np.zeros(n, dtype=np.float32)
-        gae        = 0.0
-
-        for t in reversed(range(n)):
-            if t == n - 1:
-                next_val  = last_value
-                next_term = float(dones[t])
-            else:
-                next_val  = values[t + 1]
-                next_term = float(dones[t])
-
-            # GAE with correct truncation: next_val is bootstrapped, but gae is reset.
-            # Terminated (done and not truncated): no bootstrap, gae is reset.
-            if truncateds[t]:
-                delta = rewards[t] + self.gamma * next_val - values[t]
-                gae   = delta
-            else:
-                delta = rewards[t] + self.gamma * next_val * (1.0 - next_term) - values[t]
-                gae   = delta + self.gamma * self.lam * (1.0 - next_term) * gae
+    def update(self, last_vals: Dict[str, float] | None = None) -> Dict[str, float]:
+        """Perform a training update from accumulated buffers.
+        
+        last_vals: Map of agent_id to the value of the final observation in the rollout.
+        """
+        all_data = []
+        
+        total_steps = 0
+        for aid, buf in self.buffers.items():
+            if len(buf) == 0: continue
             
-            advantages[t] = gae
+            # Use last_vals for bootstrapping if provided, otherwise 0
+            last_val = last_vals.get(aid, 0.0) if last_vals else 0.0
+            data = buf.get(self.config.gamma, self.config.lam, last_val=last_val)
+            
+            # Per-agent advantage normalization
+            adv = data['adv']
+            data['adv'] = (adv - adv.mean()) / (adv.std() + 1e-8)
+            
+            # Convert dict to TensorDict
+            td = TensorDict({
+                "obs": data['obs'],
+                "act": data['act'],
+                "ret": data['ret'],
+                "adv": data['adv'],
+                "logp": data['logp']
+            }, batch_size=[len(data['obs'])])
+            
+            all_data.append(td)
+            
+            total_steps += len(data['obs'])
+            
+        if total_steps == 0:
+            return {"loss_policy": 0.0, "loss_value": 0.0}
 
-        return advantages, advantages + values[:n]
+        # tensordict Integration: Single line cat and move to device
+        data = torch.cat(all_data, dim=0).to(self.device)
 
-    def _push_to_mediator(self) -> None:
-        self.mediator.batch_push(self.buffer.to_transitions(self.agent_id))
+        # Dataset for minibatch updates using TensorDict
+        indices = torch.randperm(total_steps)
+        
+        avg_pi_loss = 0.0
+        avg_v_loss = 0.0
+        updates = 0
+
+        for _ in range(self.config.update_epochs):
+            for i in range(0, total_steps, self.config.minibatch_size):
+                idx = indices[i:i+self.config.minibatch_size]
+                batch = data[idx]
+                
+                dist, val = self.model(batch["obs"])
+                logp = dist.log_prob(batch["act"])
+                ratio = torch.exp(logp - batch["logp"])
+                
+                clip_adv = torch.clamp(ratio, 1 - self.config.clip_ratio, 1 + self.config.clip_ratio) * batch["adv"]
+                loss_pi = -(torch.min(ratio * batch["adv"], clip_adv)).mean()
+                loss_v = ((val.squeeze(-1) - batch["ret"])**2).mean() * self.config.value_coef
+                loss_ent = -dist.entropy().mean() * self.config.entropy_coef
+                
+                loss = loss_pi + loss_v + loss_ent
+                
+                self.optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5)
+                self.optimizer.step()
+                
+                avg_pi_loss += loss_pi.item()
+                avg_v_loss += loss_v.item()
+                updates += 1
+
+        return {
+            "loss_policy": avg_pi_loss / max(1, updates),
+            "loss_value": avg_v_loss / max(1, updates)
+        }

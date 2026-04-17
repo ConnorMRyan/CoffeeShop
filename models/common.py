@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from typing import Tuple, Optional
+from einops import rearrange
 
 class Reshape(nn.Module):
     """Inline reshape: (batch, C*H*W) -> (batch, C, H, W)."""
@@ -11,7 +12,7 @@ class Reshape(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.dim() == 4:
             return x
-        return x.view(-1, self.C, self.H, self.W)
+        return rearrange(x, 'b (c h w) -> b c h w', c=self.C, h=self.H, w=self.W)
 
 class NatureCNN(nn.Module):
     """

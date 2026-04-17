@@ -1,257 +1,134 @@
 from __future__ import annotations
-
-import contextlib
-import io
-import logging
-import os
-from typing import Dict, Tuple
-
+from typing import Any, Dict, Tuple, List
 import numpy as np
-import torch
 
-from overcooked_ai_py.mdp.overcooked_env import OvercookedEnv
-from overcooked_ai_py.mdp.overcooked_mdp import Action, OvercookedGridworld
+try:
+    from overcooked_ai_py.mdp.overcooked_mdp import OvercookedGridworld
+    from overcooked_ai_py.mdp.actions import Action
+except Exception:  # pragma: no cover - optional dependency
+    OvercookedGridworld = None  # type: ignore
+    Action = None  # type: ignore
+
 from envs import SocialEnvWrapper
 
-# Silence noisy internal planner logs globally
-logging.getLogger("overcooked_ai_py.planning.planners").setLevel(logging.WARNING)
 
-# Pre-build the action lookup once at import time
-_ACTION_MAP = Action.ALL_ACTIONS
-
-# ---------------------------------------------------------------------------
-# Custom layout resolution
-# ---------------------------------------------------------------------------
-
-_CUSTOM_LAYOUTS_DIR = os.path.join(os.path.dirname(__file__), "layouts")
-
-
-def _load_mdp(layout_name: str) -> OvercookedGridworld:
-    """
-    Load an OvercookedGridworld by name.  Checks the project-local
-    envs/overcooked/layouts/ directory first so custom layouts can be added
-    without touching the installed overcooked_ai_py package.
-    """
-    custom_path = os.path.join(_CUSTOM_LAYOUTS_DIR, layout_name + ".layout")
-    if os.path.isfile(custom_path):
-        with open(custom_path) as f:
-            params = eval(f.read())  # same eval-based format as overcooked's own layouts
-        # Strip indentation whitespace from each row; drop empty lines produced
-        # by leading/trailing newlines in triple-quoted strings.
-        grid = [row.strip() for row in params["grid"].split("\n") if row.strip()]
-        del params["grid"]
-        params["layout_name"] = layout_name
-        return OvercookedGridworld.from_grid(grid, params)
-    return OvercookedGridworld.from_layout_name(layout_name)
-
-# Number of agents is fixed for Overcooked-AI (always a two-player game)
-_N_AGENTS = 2
-
+class DummySpace:
+    def __init__(self, shape, n=None):
+        self.shape = shape
+        self.n = n
 
 class OvercookedSocialWrapper(SocialEnvWrapper):
+    """Overcooked-AI wrapper for CoffeeShop's multi-agent API.
+
+    Wraps the Overcooked environment to provide observations, rewards, and other data
+    in the required dictionary format keyed by agent IDs.
     """
-    Live Overcooked-AI wrapper conforming to CoffeeShop's SocialEnvWrapper API.
-    """
 
-    _ACTION_DIM = 6
-
-    def __init__(
-            self,
-            layout_name: str = "cramped_room",
-            horizon: int = 400,
-            reward_shaping_factor: float = 1.0,
-            inactivity_penalty_magnitude: float = 0.00,
-            inactivity_steps: int = 3,
-            render_mode: str | None = None,
-            **kwargs,
-    ) -> None:
-        self._layout_name = layout_name
-        self._horizon = horizon
-        self._reward_shaping_factor = reward_shaping_factor
-        self._inactivity_penalty_magnitude = inactivity_penalty_magnitude
-        self._inactivity_steps = inactivity_steps
-        self._render_mode = render_mode
-        self._agent_ids = ["agent_0", "agent_1"]
-
-        # Inactivity tracking
-        self._prev_positions: Dict[str, Tuple[int, int]] = {}
-        self._inactivity_counts: Dict[str, int] = {aid: 0 for aid in self._agent_ids}
-        self._total_inactivity_penalty = 0.0
-
-        # Suppress Overcooked-AI startup chatter
-        with contextlib.redirect_stdout(io.StringIO()):
-            self._mdp = _load_mdp(layout_name)
-            self._env = OvercookedEnv.from_mdp(
-                self._mdp,
-                horizon=horizon,
-                info_level=0,
+    def __init__(self, layout_name: str = "cramped_room") -> None:
+        if OvercookedGridworld is None:
+            raise ImportError(
+                "overcooked-ai is not installed. Add it to requirements or install manually."
             )
-            self._env.reset()
-
-        # Dynamically infer observation dimensions from the actual layout
-        sample_raw = self._mdp.lossless_state_encoding(self._env.state)
-        self._obs_dim = int(np.asarray(sample_raw[0], dtype=np.float32).size)
-        self._global_obs_dim = self._obs_dim * len(self._agent_ids)
-
-    # ------------------------------------------------------------------
-    # Properties
-    # ------------------------------------------------------------------
+        self._agent_ids = ["agent_0", "agent_1"]
+        self.horizon = 400
+        self._step_count = 0
+        self.mdp = OvercookedGridworld.from_layout_name(layout_name, horizon=self.horizon)
+        self._state = None
+        
+        # We manually compute the flattened size of lossless encoding. For cramped_room with 2 agents, it's typically 96.
+        # We use a dummy space object to keep it dependency-light, or import gym.spaces if installed.
+        dummy_state = self.mdp.get_standard_start_state()
+        dummy_obs = self.mdp.lossless_state_encoding(dummy_state)[0]
+        flat_dim = np.prod(np.array(dummy_obs).shape)
+        
+        self.obs_space = DummySpace(shape=(flat_dim,))
+        self.act_space = DummySpace(shape=(), n=6)
 
     @property
-    def agent_ids(self):
+    def obs_space(self):
+        return self._obs_space
+
+    @obs_space.setter
+    def obs_space(self, value):
+        self._obs_space = value
+
+    @property
+    def act_space(self):
+        return self._act_space
+
+    @act_space.setter
+    def act_space(self, value):
+        self._act_space = value
+
+    def get_global_obs(self) -> Any:
+        """Return a global state for the centralized critic."""
+        # For Overcooked, we can concatenate the lossless encodings or use mdp state
+        if self._state is None:
+            return None
+        encodings = self.mdp.lossless_state_encoding(self._state)
+        return np.concatenate([encodings[0], encodings[1]], axis=-1).flatten()
+
+    def _flatten_obs(self, obs: list) -> np.ndarray:
+        return np.array(obs, dtype=np.float32).flatten()
+
+    def reset(self, seed: int | None = None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        self._step_count = 0
+        self._state = self.mdp.get_standard_start_state()
+        encodings = self.mdp.lossless_state_encoding(self._state)
+        # Overcooked returning list of obs per agent (e.g. index 0 -> agent_0, index 1 -> agent_1)
+        obs = {
+            self.agent_ids[0]: self._flatten_obs(encodings[0]),
+            self.agent_ids[1]: self._flatten_obs(encodings[1])
+        }
+        infos = {aid: {} for aid in self.agent_ids}
+        return obs, infos
+
+    def step(self, actions_dict: Dict[str, Any]) -> Tuple[
+        Dict[str, Any], Dict[str, float], Dict[str, bool], Dict[str, bool], Dict[str, Any]
+    ]:
+        a0 = self._to_env_action(actions_dict.get("agent_0"))
+        a1 = self._to_env_action(actions_dict.get("agent_1"))
+        next_state, info = self.mdp.get_state_transition(self._state, (a0, a1))
+        self._state = next_state
+        
+        encodings = self.mdp.lossless_state_encoding(self._state)
+        obs = {
+            self.agent_ids[0]: self._flatten_obs(encodings[0]),
+            self.agent_ids[1]: self._flatten_obs(encodings[1])
+        }
+        
+        sparse_reward = sum(info['sparse_reward_by_agent'])
+        rewards = {aid: float(sparse_reward) for aid in self.agent_ids}  # shared sparse reward
+        terminated = {aid: False for aid in self.agent_ids}
+        self._step_count += 1
+        is_truncated = self._step_count >= self.horizon
+        truncated = {aid: is_truncated for aid in self.agent_ids}
+        infos = {aid: info for aid in self.agent_ids}
+        return obs, rewards, terminated, truncated, infos
+
+    @property
+    def agent_ids(self) -> List[str]:
         return self._agent_ids
 
-    @property
-    def obs_dim(self) -> int:
-        return self._obs_dim
+    def close(self) -> None:
+        pass
 
-    @property
-    def action_dim(self) -> int:
-        return self._ACTION_DIM
-
-    @property
-    def global_obs_dim(self) -> int:
-        return self._global_obs_dim
-
-    # ------------------------------------------------------------------
-    # Gym-style API
-    # ------------------------------------------------------------------
-
-    def reset(self, seed=None, options=None):
-        """
-        Overcooked-AI does not expose Gym-style per-reset seeding here,
-        so the seed argument is accepted for API compatibility but unused.
-        """
-        with contextlib.redirect_stdout(io.StringIO()):
-            self._env.reset()
-        
-        # Reset inactivity tracking
-        self._prev_positions = {
-            aid: self._env.state.players[i].position 
-            for i, aid in enumerate(self._agent_ids)
+    def _to_env_action(self, a: Any):
+        if Action is None:
+            raise RuntimeError("Overcooked Action enum unavailable")
+        # Action map: 0->stay, 1->up, 2->down, 3->right, 4->left, 5->interact
+        # Note: mapping direction values correctly for overcooked mdp
+        mapping = {
+            0: (0, 0),
+            1: (0, -1),
+            2: (0, 1),
+            3: (1, 0),
+            4: (-1, 0),
+            5: 'interact',
         }
-        self._inactivity_counts = {aid: 0 for aid in self._agent_ids}
-        self._total_inactivity_penalty = 0.0
-
-        obs = self._encode_state(self._env.state)
-        return obs, {}
-
-    def step(
-            self,
-            actions: Dict[str, int],
-    ) -> Tuple[
-        Dict[str, torch.Tensor],
-        Dict[str, float],
-        Dict[str, bool],
-        Dict[str, bool],
-        dict,
-    ]:
-        # Convert discrete policy outputs into Overcooked joint actions
-        joint_action = tuple(_ACTION_MAP[actions[aid]] for aid in self._agent_ids)
-
-        # Step the underlying environment.
-        next_state, team_reward, done, info = self._env.step(joint_action)
-
-        # Safely extract per-agent reward components
-        shaped = info.get("shaped_r_by_agent", [0.0] * _N_AGENTS)
-        sparse = info.get("sparse_r_by_agent",  [0.0] * _N_AGENTS)
-
-        # Raw rewards for the mediator to handle averaging.
-        # This stops reward data leakage in the centralized critic.
-        rewards = {
-            aid: float(team_reward) / _N_AGENTS + float(shaped[i]) * self._reward_shaping_factor
-            for i, aid in enumerate(self._agent_ids)
-        }
-
-        # Inactivity and Stall Logic
-        step_inactivity_penalty = 0.0
-        step_stalls = {aid: 0 for aid in self._agent_ids}
-        for i, aid in enumerate(self._agent_ids):
-            curr_pos = next_state.players[i].position
-            prev_pos = self._prev_positions.get(aid)
-            is_interacting = (joint_action[i] == Action.INTERACT)
-            
-            # A "stall" is either Action.STAY (index 0) OR moving into a wall (curr_pos == prev_pos when moving)
-            is_stay = (actions[aid] == 0)
-            is_into_wall = (curr_pos == prev_pos and not is_stay and not is_interacting)
-            if is_stay or is_into_wall:
-                step_stalls[aid] = 1
-
-            if curr_pos == prev_pos and not is_interacting:
-                self._inactivity_counts[aid] += 1
-            else:
-                self._inactivity_counts[aid] = 0
-            
-            if self._inactivity_counts[aid] >= self._inactivity_steps:
-                penalty = self._inactivity_penalty_magnitude
-                step_inactivity_penalty += penalty
-                rewards[aid] -= penalty
-            
-            self._prev_positions[aid] = curr_pos
-
-        self._total_inactivity_penalty += step_inactivity_penalty
-
-        # Preserve sparse rewards for mediator / gossip logic
-        sparse_rewards  = {aid: float(sparse[i])  for i, aid in enumerate(self._agent_ids)}
-        shaped_rewards  = {aid: float(shaped[i])  for i, aid in enumerate(self._agent_ids)}
-
-        # Disambiguate horizon expiry from genuine termination.
-        done_info = info.get("done_info", {})
-        is_timeout = bool(done_info.get("timeout", False))
-
-        if done and is_timeout:
-            # Horizon expiry: episode should be bootstrapped by PPO
-            terminated = {aid: False for aid in self._agent_ids}
-            truncated  = {aid: True  for aid in self._agent_ids}
-        else:
-            # Genuine task completion (or environment error)
-            terminated = {aid: bool(done) for aid in self._agent_ids}
-            truncated  = {aid: False      for aid in self._agent_ids}
-
-        infos = {
-            "team_reward":        float(team_reward),
-            "sparse_rewards":     sparse_rewards,
-            "shaped_rewards":     shaped_rewards,
-            "inactivity_penalty": step_inactivity_penalty,
-            "total_inactivity_penalty": self._total_inactivity_penalty,
-            "action_entropy_stall": step_stalls,
-            "has_delivery":       any(s > 0 for s in sparse),
-            "is_timeout":         is_timeout,
-        }
-
-        return self._encode_state(next_state), rewards, terminated, truncated, infos
-
-    def get_global_obs(self, obs_dict: Dict[str, torch.Tensor]) -> torch.Tensor:
-        return torch.cat([obs_dict[aid] for aid in self._agent_ids], dim=-1)
-
-    def render(self) -> None:
-        """
-        Placeholder. OvercookedEnv.render() typically needs additional setup
-        for a live window; keeping this quiet for training compatibility.
-        """
-        if self._render_mode == "human":
-            pass
-
-    def close(self):
-        if hasattr(self, "_env") and hasattr(self._env, "close"):
-            self._env.close()
-        else:
-            # OvercookedEnv often doesn't need a formal close,
-            # so we can just pass or log a debug message.
-            pass
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _encode_state(self, state) -> Dict[str, torch.Tensor]:
-        """
-        Flatten the lossless Overcooked state encoding into per-agent vectors.
-        """
-        raw = self._mdp.lossless_state_encoding(state)
-
-        encoded = {}
-        for i, aid in enumerate(self._agent_ids):
-            arr = np.asarray(raw[i], dtype=np.float32).reshape(-1)
-            encoded[aid] = torch.from_numpy(arr)
-        return encoded
+        if isinstance(a, str):
+            str_mapping = {
+                "stay": (0, 0), "up": (0, -1), "down": (0, 1), "left": (-1, 0), "right": (1, 0), "interact": 'interact',
+            }
+            return str_mapping.get(a, (0, 0))
+        return mapping.get(a, (0, 0))
