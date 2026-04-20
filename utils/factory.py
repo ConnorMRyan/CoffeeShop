@@ -37,21 +37,19 @@ def _env_idx(agent_id: str) -> int:
 def make_actors(runner: "VectorSocialRunner", mediator: CoffeeShopMediator, cfg: DictConfig, distributed: bool = False) -> Dict[str, SocialActor]:
     """Factory to create SocialActor (PPOAgent) instances."""
     from agents.ppo import PPOAgent as SocialActor, PPOConfig
-    from torch.nn.parallel import DistributedDataParallel as DDP
     a_cfg = cfg.agent
     
     # Map Hydra config to PPOConfig dataclass
     ppo_config = PPOConfig(
+        lr=a_cfg.lr,
         gamma=a_cfg.gamma,
         lam=a_cfg.lam,
-        clip_eps=a_cfg.clip_eps,
-        c_vf=a_cfg.c_vf,
-        c_ent=a_cfg.c_ent,
-        ppo_epochs=a_cfg.ppo_epochs,
-        mini_batch_size=a_cfg.mini_batch_size,
-        lr=a_cfg.lr,
+        clip_ratio=a_cfg.clip_eps,
+        value_coef=a_cfg.c_vf,
+        entropy_coef=a_cfg.c_ent,
+        update_epochs=a_cfg.ppo_epochs,
+        minibatch_size=a_cfg.mini_batch_size,
         hidden_size=a_cfg.hidden,
-        device=cfg.trainer.device
     )
     
     actors = {}

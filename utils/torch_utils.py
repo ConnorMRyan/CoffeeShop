@@ -1,5 +1,4 @@
 import torch
-from torch.distributions import Categorical
 
 def select_action(ac, obs_tensor: torch.Tensor, deterministic: bool = True) -> int:
     """Extract a discrete action from the ActorCriticNet."""
@@ -7,8 +6,8 @@ def select_action(ac, obs_tensor: torch.Tensor, deterministic: bool = True) -> i
         obs_tensor = obs_tensor.unsqueeze(0)
 
     with torch.no_grad():
-        logits, _ = ac(obs_tensor)   # ActorCriticNet always returns (logits, value)
+        dist, _ = ac(obs_tensor)  # ActorCritic returns (Categorical, value)
 
     if deterministic:
-        return int(torch.argmax(logits, dim=-1).item())
-    return int(Categorical(logits=logits).sample().item())
+        return int(dist.probs.argmax(dim=-1).item())
+    return int(dist.sample().item())

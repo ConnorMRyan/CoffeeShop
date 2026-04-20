@@ -50,7 +50,9 @@ class CoffeeShopMediator:
         self.raw_rewards: Dict[str, float] = {}
 
         # We assume local observation spaces apply to central critic for now
-        if hasattr(self.env, "obs_space") and hasattr(self.env.obs_space, "shape"):
+        if hasattr(self.env, "obs_dim"):
+            obs_dim = self.env.obs_dim
+        elif hasattr(self.env, "obs_space") and hasattr(self.env.obs_space, "shape") and self.env.obs_space.shape is not None:
             obs_dim = int(np.prod(self.env.obs_space.shape))
         else:
             obs_dim = 96 # default overcooked

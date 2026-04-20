@@ -1,0 +1,53 @@
+# ── Cloud Build — build and push the CoffeeShop training image ───────────────
+#
+# Manual trigger:
+#   gcloud builds submit \
+#     --config cloudbuild.yaml \
+#     --substitutions _REGION=us-central1,_REPO=coffeeshop,_IMAGE=train .
+#
+# Connect to a GitHub trigger in the GCP console to run on every push to main.
+#
+# The build pushes two tags:
+#   <REGION>-docker.pkg.dev/<PROJECT>/coffeeshop/train:<SHORT_SHA>  (immutable)
+#   <REGION>-docker.pkg.dev/<PROJECT>/coffeeshop/train:latest        (moving)
+#
+# Prerequisites (one-time setup):
+#   gcloud artifacts repositories create coffeeshop \
+#     --repository-format=docker \
+#     --location=$REGION \
+#     --description="CoffeeShop MARL images"
+
+steps:
+  # ── Build ───────────────────────────────────────────────────────────────────
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --tag=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:${SHORT_SHA}
+      - --tag=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:latest
+      # Pass the commit SHA as a build-time label for traceability
+      - --label=git-commit=${SHORT_SHA}
+      - --cache-from=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:latest
+      - .
+
+  # ── Push ────────────────────────────────────────────────────────────────────
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - --all-tags
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}
+
+images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:${SHORT_SHA}
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_IMAGE}:latest
+
+substitutions:
+  _REGION: us-central1   # Artifact Registry region
+  _REPO:   coffeeshop    # Artifact Registry repository name
+  _IMAGE:  train         # Image name within the repository
+
+options:
+  # E2_HIGHCPU_8 has enough RAM and cores to compile NLE during the build
+  machineType: E2_HIGHCPU_8
+  logging: CLOUD_LOGGING_ONLY

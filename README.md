@@ -1,189 +1,130 @@
 # ☕ CoffeeShop: Asynchronous Social Experience Sharing for MARL
 
-CoffeeShop is a modular Multi-Agent Reinforcement Learning (MARL) framework that implements **Asynchronous Social Experience Sharing**. It allows decentralized agents to learn independently while sharing high-value transitions through a centralized Mediator.
+CoffeeShop is a highly modular, Multi-Agent Reinforcement Learning (MARL) framework. It introduces the concept of **Asynchronous Social Experience Sharing**, allowing independently acting, decentralized agents to securely share transition data through a centralized, off-policy Mediator.
 
-Designed for research and rapid experimentation, CoffeeShop provides a unified API for environments, hierarchical YAML configuration, and advanced telemetry for monitoring population metrics.
-
-> **Paper:** [CoffeeShop: Asynchronous Social Experience Sharing via Off-Policy Mediation in Multi-Agent Reinforcement Learning](./CoffeeShop_Refactored.md)
+Designed for robust research and rapid experimentation, CoffeeShop abstracts away boilerplate infrastructure, featuring strict environment contracts, hierarchical YAML configuration, and unified telemetry.
 
 ---
 
 ## ✨ Key Features
 
-- **Asynchronous Social Experience Sharing:** Agents push high-reward transitions to a central `PrioritizedBuffer`. A `CoffeeShopMediator` evaluates and broadcasts these trajectories back to the population.
-- **Dynamic Openness (ω):** Agents learn a continuous parameter (ω ∈ [0.05, 0.75]) that gates receptivity to Mediator-provided trajectories, scaled by internal value-network uncertainty.
-- **Hierarchical Configuration:** Experiments are entirely config-driven via [Hydra](https://hydra.cc/) (which uses [OmegaConf](https://omegaconf.readthedocs.io/) as its config backend). Mix and match `agent`, `env`, `mediator`, and `trainer` parameters without touching Python code.
-- **Strict API Contracts:** `SocialEnvWrapper` enforces a standardized dictionary-based API across different environments (Overcooked, Crafter, etc.).
-- **Telemetry:** Built-in support for TensorBoard and Weights & Biases, including population-level metrics such as **Population Diversity** (measured via Jensen-Shannon Divergence).
+* **Asynchronous Social Experience Sharing:** Agents push high-value transitions to a central `PrioritizedBuffer`. A `CoffeeShopMediator` evaluates these memories and broadcasts them back to the population, gating low-quality or stale data.
+* **Dynamic Openness (ω):** Agents utilize a learned, continuous parameter ($\omega \in [0.05, 0.75]$) to dynamically weight how much they trust and clone the behaviors broadcasted by the Mediator.
+* **Hierarchical Configuration:** Powered by `OmegaConf`, experiments are entirely config-driven. Mix and match `agent`, `env`, `mediator`, and `trainer` parameters without touching Python code.
+* **Strict API Contracts:** The `SocialEnvWrapper` enforces a standardized dictionary-based API across vastly different environments (from grid-worlds to complex 3D simulators).
+* **Enterprise Telemetry:** Built-in graceful degradation for TensorBoard and Weights & Biases logging, including advanced metrics like **Population Diversity** (tracked via Jensen-Shannon Divergence).
 
 ---
 
-## 🛠️ Stack & Requirements
+## 🏗️ Architecture Overview
 
-- **Language:** Python 3.10+ (required for `tensordict` compatibility)
-- **Package Manager:** [uv](https://github.com/astral-sh/uv) (recommended for fast, reproducible environment setup)
-- **Deep Learning:** [PyTorch](https://pytorch.org/) 2.2.0
-- **High Performance:** [Tensordict](https://github.com/pytorch/tensordict), [Einops](https://einops.rocks/), [Polars](https://pola.rs/)
-- **RL Ecosystem:** [Gymnasium](https://gymnasium.farama.org/), [Shimmy](https://shimmy.farama.org/)
-- **Configuration:** [Hydra](https://hydra.cc/) + [OmegaConf](https://omegaconf.readthedocs.io/)
-- **Logging & UI:** [Rich](https://github.com/Textualize/rich), [Loguru](https://github.com/Delgan/loguru), [tqdm](https://github.com/tqdm/tqdm)
+The CoffeeShop architecture separates the RL logic from the communication layer, ensuring that agents can learn independently while benefiting from the collective experience of the swarm.
 
-> **Note:** Due to compatibility issues between PyTorch 2.2.0 and NumPy 2.0, this project requires **NumPy < 2.0** (specifically `1.26.4`).
+1. **The Swarm (Local Policies):** Decentralized agents (e.g., On-policy PPO) interact with their local environment instances. They maintain their own specific goals and observation spaces.
+2. **The Mediator (Centralized Critic):** A global, off-policy observer. It maintains a `PrioritizedBuffer` of shared experiences.
+3. **The Feedback Loop:** * Agents securely push high-reward transitions to the Mediator.
+    * The Mediator calculates a "Social Bonus" using its global value function.
+    * High-quality experiences are broadcast back to the agents, who incorporate them via an auxiliary Behavioral Cloning (BC) loss.
+
+---
+
+## 📂 Repository Structure
+
+```text
+CoffeeShop/
+├── core_marl/           # The Brain: Communication and Experience Sharing
+│   ├── mediator.py          # Centralized critic and broadcasting logic
+│   ├── memory.py            # Prioritized replay buffer for social memories
+│   └── social_actor.py      # Bindings between global IDs and local policies
+├── agents/              # The Local Policies: RL Algorithms
+│   ├── ppo.py               # Flagship PPO with auxiliary BC loss and learned openness (ω)
+│   └── sac.py               # Continuous control off-policy baseline
+├── envs/                # The Domains: Strict API Contracts
+│   ├── base.py              # SocialEnvWrapper (Abstract Base Class)
+│   ├── overcooked/          # 2D Cooperative Gridworld
+│   ├── crafter/             # Open-world Survival
+│   ├── nethack/             # Roguelike benchmark
+│   ├── meltingpot/          # Cooperative social dilemmas
+│   └── aisaac/              # Complex reinforcement learning swarm (custom)
+├── utils/               # The Infrastructure: Factories and Telemetry
+│   ├── factory.py           # Centralized instantiation (make_env, make_actors)
+│   ├── evaluation.py        # N-agent dynamic evaluation loops
+│   ├── metrics.py           # System-wide calculations (e.g., JS Divergence)
+│   └── checkpointing.py     # Robust state-dict loading and saving
+├── configs/             # The State Management: OmegaConf YAMLs
+│   ├── agent/               
+│   ├── env/                 
+│   ├── mediator/            
+│   └── trainer/             
+├── coffeeshop/          # Execution layer: train, eval, playback entry points.
+│   ├── train.py             # Main orchestration loop
+│   ├── eval.py              # Cross-play and baseline benchmarking
+│   └── playback.py          # Visual debugging and GIF rendering
+└── tests/               # Unit and Integration Tests
+    ├── test_smoke.py        # 1k-step run-and-exit verification
+    ├── test_mediator_math.py # Verification of social trust bounds
+    └── test_mediator_manual.py # Manual mediator integration tests
+```
+
+---
+
+## 📄 Research Context
+
+For a detailed analysis of how CoffeeShop relates to existing MARL literature
+(QMIX, MAPPO, IPPO, off-policy distillation), see
+[COFFEESHOP_NOVELTY_ANALYSIS.md](./COFFEESHOP_NOVELTY_ANALYSIS.md).
 
 ---
 
 ## 🚀 Quick Start
 
-### 1. Installation (Recommended: uv)
-
-`uv` is the canonical package manager for this project. `requirements.txt` is provided for legacy compatibility only; `uv.lock` is the authoritative lockfile.
-
+### Installation
+Clone the repository and install the required dependencies:
 ```bash
-# Install uv
-# Linux/macOS
-curl -LsSf https://astral-sh.uv.run/install.sh | sh
-
-# Windows (PowerShell)
-powershell -c "irm https://astral-sh.uv.run/install.ps1 | iex"
-
-# Clone the repository
 git clone https://github.com/ConnorMRyan/CoffeeShop.git
 cd CoffeeShop
-
-# Create virtualenv and sync dependencies
-uv sync
-```
-
-To run commands within the managed environment:
-
-```bash
-# Run training
-uv run python scripts/train.py env=overcooked agent=ppo
-
-# Run tests
-uv run pytest tests/
-```
-
-### 2. Legacy Installation (pip)
-
-If you prefer `pip`, ensure you are using **Python 3.10+**:
-
-```bash
-# Create and activate your own venv first, then:
 pip install -r requirements.txt
-pip install -e .
 ```
+*(Note: TensorBoard and Weights & Biases are optional dependencies. The framework will gracefully default to standard console logging if they are not installed).*
 
-To install all environment dependencies (Overcooked, Crafter, NetHack):
+### 1. Training a Population
+CoffeeShop uses a clean, dot-notation CLI driven by `OmegaConf`. You can override any nested parameter directly from the command line.
 
 ```bash
-# With uv
-uv sync --all-extras
+# Train on the default environment (Overcooked Cramped Room)
+python coffeeshop/train.py
 
-# With pip
-pip install ".[all]"
+# Train on Crafter with specific overrides
+python coffeeshop/train.py env=crafter trainer.total_steps=5000000 trainer.device=cuda
 ```
 
-> **Note:** Some optional environments (like `crafter`) may face encoding issues during build on Windows. If `uv sync --all-extras` fails, install core dependencies first and then add specific extras as needed.
-
-### 3. Training a Population
-
-The primary entry point is `scripts/train.py`, orchestrated via Hydra.
+### 2. Evaluating Checkpoints
+The evaluation utility dynamically scales to handle N-agent environments.
 
 ```bash
-# Standard single-process run
-python scripts/train.py env=overcooked agent=ppo run_id=experiment_1
-
-# Overriding environment and steps
-python scripts/train.py env=overcooked agent=ppo run.steps=50000 env.layout_name=cramped_room
-
-# Distributed training via torchrun (Linux/macOS, 2 processes)
-torchrun --nproc_per_node=2 scripts/train.py env=overcooked agent=ppo run_id=dist_run run.dist_backend=gloo
+# Evaluate cross-play between two different checkpoints
+python coffeeshop/eval.py --env overcooked --layout cramped_room \
+    --ckpt_a checkpoints/run_1/checkpoint_100k.pt \
+    --ckpt_b checkpoints/run_2/checkpoint_100k.pt \
+    --episodes 10
 ```
 
----
-
-## 📂 Project Structure
-
-```text
-CoffeeShop/
-├── agents/              # RL Algorithms (PPO optimized with TensorDict)
-├── conf/                # Hydra YAML configurations (agent, env, mediator, trainer)
-├── core_marl/           # The Engine: Mediator, buffers, and social actors
-├── envs/                # Environment wrappers (Overcooked, Crafter, NetHack, etc.)
-├── models/              # Neural network architectures (MLP, CNN encoders)
-├── outputs/             # Default Hydra output directory for logs and parquet metrics
-├── scripts/             # Main training and evaluation scripts
-├── tests/               # Core unit and integration tests (pytest + Hypothesis)
-├── utils/               # Shared utilities (metrics, diversity analysis, factories)
-├── pyproject.toml       # Package metadata and locked dependencies
-├── uv.lock              # Authoritative lockfile for reproducible environments
-└── requirements.txt     # Legacy pip dependencies
-```
-
----
-
-## 📜 Scripts & Entry Points
-
-### Main Entry Points
-- `scripts/train.py`: Unified training loop supporting single-process and distributed (DDP) execution via Hydra.
-- `scripts/evaluate.py`: Standalone evaluation utility. Run `python scripts/evaluate.py --help` for available flags.
-
-### Legacy Components
-Legacy orchestration layers (`coffeeshop/` and redundant `configs/`) have been removed in favour of the modernized `scripts/` and `conf/` workflow to ensure architectural consistency.
-
----
-
-## 🧪 Testing
-
-Run the test suite using `pytest`:
+### 3. Rendering Playback
+Generate `.gif` files to visually inspect policy behavior and coordination.
 
 ```bash
-pytest tests/
-```
-
-Key tests:
-- `tests/test_invariants.py`: Property-based testing for buffer integrity using Hypothesis.
-- `tests/test_experience_buffer.py`: Core logic for experience collection and sampling.
-
----
-
-## ⚙️ Environment Variables
-
-- `WANDB_API_KEY`: Set your API key for Weights & Biases logging.
-- `CUDA_VISIBLE_DEVICES`: (Optional) Specify which GPUs to use for training.
-
----
-
-## 🤝 Extending CoffeeShop
-
-### Adding an Environment
-1. Implement a `SocialEnvWrapper` in `envs/{env_name}/wrapper.py`.
-2. Ensure observations/actions are dictionaries keyed by `agent_id`.
-3. Register the environment in `utils/factory.py`.
-
-### Adding an Agent
-1. Extend the stubs in `agents/`.
-2. Implement the `act()` and `update()` methods.
-3. Use `ExperienceBuffer.export()` for batching.
-
----
-
-## 📄 Citation
-
-If you use CoffeeShop in your research, please cite:
-
-```bibtex
-@misc{ryan2025coffeeshop,
-  title   = {CoffeeShop: Asynchronous Social Experience Sharing via Off-Policy Mediation in Multi-Agent Reinforcement Learning},
-  author  = {Ryan, Connor},
-  year    = {2025},
-  url     = {https://github.com/ConnorMRyan/CoffeeShop}
-}
+python coffeeshop/playback.py checkpoints/run_1/checkpoint_100k.pt \
+    --env overcooked \
+    --layout cramped_room \
+    --output syngergy_demo.gif
 ```
 
 ---
 
-## ⚖️ License
+## 🛠️ Extending CoffeeShop
 
-This project is licensed under the **Apache License 2.0**. See [LICENSE](./LICENSE) for details.
+### Adding a New Environment
+CoffeeShop can support any environment. Simply subclass `SocialEnvWrapper` in `envs/base.py` and implement the required abstract methods (`reset`, `step`, `get_global_obs`). Ensure that all observations, actions, and rewards use dictionaries keyed by `agent_id` (e.g., `{"agent_0": 1.5}`). Register your new wrapper in `utils/factory.py:make_env()`.
+
+### Tracking New Metrics
+All system-wide metrics are tracked in `utils/metrics.py`. The orchestration loop in `coffeeshop/train.py` automatically pulls these and broadcasts them to both TensorBoard and WandB simultaneously.

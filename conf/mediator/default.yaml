@@ -1,5 +1,5 @@
 # CoffeeShopMediator Config
-buffer_capacity: 10000
+buffer_capacity: 100000
 gamma: 0.99
 epsilon_td: 0.05
 synergy_alpha: 0.3

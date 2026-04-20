@@ -3,16 +3,16 @@ from __future__ import annotations
 import os
 import hydra
 from omegaconf import DictConfig, OmegaConf
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from utils import get_logger, Metrics
-from utils.diversity import calculate_population_diversity
+from utils.checkpointing import Checkpointer
 from core_marl import CoffeeShopMediator, SocialActor, SocialActorConfig, ExperienceBuffer, SharedExperienceBuffer
+from core_marl.mediator import MediatorConfig
 from envs import SocialEnvWrapper
 import numpy as np
 import torch
 import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
 from einops import rearrange, reduce
 
 # Lazy imports to keep optional deps optional
@@ -21,6 +21,10 @@ def setup_distributed(backend: str = "gloo") -> tuple[int, int]:
     if not dist.is_available():
         return 0, 1
     
+    # Prioritize 'nccl' backend if CUDA is available to avoid synchronization errors
+    if torch.cuda.is_available() and backend == "gloo":
+        backend = "nccl"
+        
     # Check if we are running under torchrun
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
         if not dist.is_initialized():
@@ -61,15 +65,29 @@ def make_env(name: str, params: Dict[str, Any], seed: Optional[int] = None) -> S
     return env
 
 
-def make_agent(name: str, obs_space=None, act_space=None, distributed: bool = False):
+def make_agent(name: str, obs_space=None, act_space=None, distributed: bool = False, obs_dim: int | None = None, agent_cfg=None):
     name = name.lower()
     if name == "ppo":
-        from agents.ppo import PPOAgent
-        agent = PPOAgent(obs_space, act_space)
-        if distributed:
-            # Wrap model in DDP
-            agent.model = DDP(agent.model)
-        return agent
+        from agents.ppo import PPOAgent, PPOConfig
+        config = None
+        if agent_cfg is not None:
+            config = PPOConfig(
+                lr=agent_cfg.lr,
+                gamma=agent_cfg.gamma,
+                lam=agent_cfg.lam,
+                clip_ratio=agent_cfg.clip_eps,
+                value_coef=agent_cfg.c_vf,
+                entropy_coef=agent_cfg.c_ent,
+                update_epochs=agent_cfg.ppo_epochs,
+                minibatch_size=agent_cfg.mini_batch_size,
+                hidden_size=agent_cfg.hidden,
+            )
+        # Do NOT wrap in DDP. DDP registers hooks directly on parameter tensors,
+        # so any backward (including BC on model.module) fires the allreduce hooks.
+        # After zero_grad(set_to_none=True) the deferred/pending allreduce sees
+        # None gradients and crashes. Instead we sync parameters manually after
+        # each PPO update via dist.all_reduce (see train loop).
+        return PPOAgent(obs_space, act_space, config=config, obs_dim=obs_dim)
     if name == "sac":
         from agents.sac import SACAgent
         return SACAgent(obs_space, act_space)
@@ -105,14 +123,27 @@ def main(cfg: DictConfig) -> None:
     
     env_params = {}
     if cfg.env.name == "overcooked":
-        env_params["layout_name"] = cfg.env.layout_name
-        
+        env_params.update(dict(cfg.env.params))
+
     env = make_env(cfg.env.name, env_params, seed=env_seed)
-    mediator = CoffeeShopMediator(env)
+
+    # Build mediator with config from YAML (critic_hidden / critic_lr map to MediatorConfig fields)
+    mediator_cfg = MediatorConfig(
+        hidden_size=cfg.mediator.critic_hidden,
+        learning_rate=cfg.mediator.critic_lr,
+        gamma=cfg.mediator.gamma,
+    )
+    mediator = CoffeeShopMediator(env, config=mediator_cfg)
 
     # 2. Build base agent
-    # We pass distributed=True to wrap the internal model in DDP
-    base_agent = make_agent(cfg.agent.name, env.obs_space, env.act_space, distributed=(world_size > 1))
+    # Pass obs_dim explicitly so Dict obs spaces (e.g. NLE) use the wrapper's
+    # pre-computed encoding dimension rather than guessing from the raw obs_space.
+    base_agent = make_agent(
+        cfg.agent.name, env.obs_space, env.act_space,
+        distributed=(world_size > 1),
+        obs_dim=getattr(env, "obs_dim", None),
+        agent_cfg=cfg.get("agent", None),
+    )
     
     # Wrap in SocialActors
     actors = {
@@ -121,21 +152,64 @@ def main(cfg: DictConfig) -> None:
     }
     
     metrics = Metrics()
-    
-    # Buffers
-    local_buffer = ExperienceBuffer()
+
+    # ── Checkpointing ────────────────────────────────────────────────────────
+    output_dir = hydra.core.hydra_config.HydraConfig.get().runtime.output_dir
+    ckpt_dir = os.path.join(original_cwd, "checkpoints", cfg.run_id)
+    gcs_cfg = cfg.get("gcs", {})
+    checkpointer = Checkpointer(
+        dirpath=ckpt_dir,
+        gcs_bucket=gcs_cfg.get("bucket", None),
+        gcs_prefix=f"{gcs_cfg.get('prefix', 'runs')}/{cfg.run_id}",
+    )
+    metrics_path = os.path.join(output_dir, f"metrics_rank{rank}.parquet")
+    checkpoint_interval  = cfg.run.get("checkpoint_interval",   50_000)
+    metrics_flush_interval = cfg.run.get("metrics_flush_interval", 10_000)
+
+    resume_step = 0
+    resume_ckpt = cfg.run.get("resume_checkpoint", None)
+    if resume_ckpt is None:
+        # Auto-resume from the latest checkpoint in the run directory if one exists
+        resume_ckpt = checkpointer.latest()
+    if resume_ckpt is not None:
+        log.info({"msg": f"Resuming from checkpoint: {resume_ckpt}"})
+        ckpt = checkpointer.load(resume_ckpt)
+        base_agent.model.load_state_dict(ckpt["model"])
+        base_agent.optimizer.load_state_dict(ckpt["optimizer"])
+        mediator.critic.load_state_dict(ckpt["mediator_critic"])
+        mediator.optimizer.load_state_dict(ckpt["mediator_optimizer"])
+        resume_step = int(ckpt["step"])
+        log.info({"msg": f"Resumed at step {resume_step}"})
+
+    # ── Dynamic meeting interval ─────────────────────────────────────────────
+    # Linearly warm the interval from meeting_interval → meeting_interval_end
+    # over meeting_interval_warmup steps. This lets the shared buffer fill
+    # quickly early in training, then reduces sync overhead for the long tail.
+    mtg_start   = cfg.run.meeting_interval
+    mtg_end     = cfg.run.get("meeting_interval_end",    mtg_start)
+    mtg_warmup  = cfg.run.get("meeting_interval_warmup", 0)
+
+    # ── Buffers ──────────────────────────────────────────────────────────────
+    # local_buffer capacity must be at least meeting_interval so that every
+    # transition collected between meetings is visible to the mediator.
+    # With capacity < meeting_interval the deque silently drops older entries.
+    local_buffer  = ExperienceBuffer(capacity=mtg_end)
     shared_buffer = SharedExperienceBuffer(capacity=5000, gamma_time=0.999)
 
     obs, infos = mediator.reset()
-    
-    # Store temporary transitions before stepping
-    last_act_info = {}
 
-    for t in range(cfg.run.steps):
+    for t in range(resume_step, cfg.run.steps):
+        # ── Dynamic meeting interval computation ─────────────────────────────
+        if mtg_warmup > 0:
+            alpha = min(1.0, (t - resume_step) / mtg_warmup)
+            current_meeting_interval = int(mtg_start + alpha * (mtg_end - mtg_start))
+        else:
+            current_meeting_interval = mtg_start
+
         # 1. Actors act
         env_actions = {}
         act_info_dict = {}
-        
+
         for aid, actor in actors.items():
             act_info = actor.act(obs[aid])
             if act_info is not None:
@@ -147,93 +221,114 @@ def main(cfg: DictConfig) -> None:
 
         # 3. Store local transitions for PPO AND for social sharing
         local_buffer.add(obs, env_actions, rewards, terminated, truncated, next_obs, infos)
-        
+
         for aid in mediator.agent_ids:
             done = terminated[aid] or truncated[aid]
             if aid in act_info_dict:
                 base_agent.store_transition(
-                    aid=aid, obs=obs[aid], act=act_info_dict[aid]["action"], 
-                    reward=rewards[aid], val=act_info_dict[aid]["val"], 
+                    aid=aid, obs=obs[aid], act=act_info_dict[aid]["action"],
+                    reward=rewards[aid], val=act_info_dict[aid]["val"],
                     logp=act_info_dict[aid]["logp"], terminal=done
                 )
 
         # 4. Trigger PPO Update
         if (t + 1) % cfg.run.horizon == 0:
-            # Calculate last values for bootstrapping
             last_vals = {}
             for aid, single_obs in obs.items():
                 o = torch.as_tensor(single_obs, dtype=torch.float32, device=base_agent.device)
                 with torch.no_grad():
                     _, val = base_agent.model(o)
                     last_vals[aid] = val.item()
-            
+
             update_metrics = base_agent.update(last_vals=last_vals)
             metrics.update(update_metrics)
-            
+
+            # Sync model parameters across ranks after each PPO update.
+            # We avoid DDP hooks (which break BC backward); sync param data instead.
+            if world_size > 1:
+                for param in base_agent.model.parameters():
+                    dist.all_reduce(param.data, op=dist.ReduceOp.AVG)
+
         # 5. The Meeting (Asynchronous Social Sharing)
-        if (t + 1) % cfg.run.meeting_interval == 0:
+        if (t + 1) % current_meeting_interval == 0:
             batch_to_share = local_buffer.export()
             local_buffer.clear()
-            
-            # CoffeeShopMediator evaluates TD-error
+
             td_errors, critic_loss = mediator.evaluate_and_prioritize(batch_to_share)
             metrics.update({"mediator_critic_loss": critic_loss})
-            
+
             if td_errors.numel() > 0:
-                # Needs exactly one priority per timestep, so reduce across agents
-                # by taking the max TD-error per step.
                 num_agents = len(mediator.agent_ids)
                 if td_errors.numel() == len(batch_to_share.observations) * num_agents:
                     priorities = reduce(td_errors, '(t a) -> t', 'max', a=num_agents).detach().cpu().tolist()
                 else:
-                    priorities = td_errors.detach().cpu().tolist()  # already per-step
+                    priorities = td_errors.detach().cpu().tolist()
                 shared_buffer.add(priorities, timestamp=t, batch=batch_to_share)
-                
-                # Sample top M experiences to distill back to actors
+
                 distillation_batch = shared_buffer.sample_top(current_time=t, n=32)
-                
-                # Format to tensors
+
                 flat_obs, flat_acts = [], []
                 for b_t in range(len(distillation_batch.observations)):
                     for aid in mediator.agent_ids:
                         if aid in distillation_batch.observations[b_t]:
                             flat_obs.append(distillation_batch.observations[b_t][aid])
                             flat_acts.append(distillation_batch.actions[b_t][aid])
-                            
+
                 if flat_obs:
-                    # Minimize redundant numpy conversions by stack directly to tensor if possible
-                    # but observations are currently numpy from env.wrapper
                     t_obs = torch.as_tensor(np.stack(flat_obs), dtype=torch.float32, device=base_agent.device)
                     t_act = torch.as_tensor(np.stack(flat_acts), dtype=torch.long, device=base_agent.device)
-                    
+
                     bc_losses = {}
+                    base_agent.optimizer.zero_grad(set_to_none=True)
+
                     for aid, actor in actors.items():
-                        bc_loss = actor.incorporate_shared_experience(t_obs, t_act)
-                        bc_losses[f"{aid}_bc_loss"] = bc_loss
+                        loss = actor.incorporate_shared_experience(t_obs, t_act)
+                        loss.backward()
+                        bc_losses[f"{aid}_bc_loss"] = loss.item()
                         bc_losses[f"{aid}_omega"] = actor.get_omega()
-                        
-                        # Step omega optimizer if learnable
+
+                    base_agent.optimizer.step()
+                    base_agent.optimizer.zero_grad(set_to_none=True)
+
+                    for aid, actor in actors.items():
                         if actor.config.omega_learnable:
                             actor.optimizer.step()
-                            actor.optimizer.zero_grad()
-                            
+                            actor.optimizer.zero_grad(set_to_none=True)
+
                     metrics.update(bc_losses)
 
-        # Simple logging/metrics
+        # ── Logging ──────────────────────────────────────────────────────────
         metrics.update({"reward": sum(rewards.values())})
-        
+
         if (t + 1) % 100 == 0:
             log.info({"step": t + 1, **metrics.mean()})
-            metrics.clear()
+
+        # Flush metrics to disk periodically so a crash doesn't wipe the history
+        # and so in-memory accumulation stays bounded over 1B steps.
+        if (t + 1) % metrics_flush_interval == 0:
+            metrics.flush(metrics_path)
+
+        # ── Checkpointing ────────────────────────────────────────────────────
+        if is_main_process and (t + 1) % checkpoint_interval == 0:
+            checkpointer.save(
+                {
+                    "model":             base_agent.model,
+                    "optimizer":         base_agent.optimizer,
+                    "mediator_critic":   mediator.critic,
+                    "mediator_optimizer": mediator.optimizer,
+                    "step":              t + 1,
+                    "rng_torch":         torch.get_rng_state(),
+                    "rng_numpy":         np.random.get_state(),
+                },
+                filename=f"checkpoint_{t + 1}.pt",
+            )
 
         obs = next_obs
         if any(terminated.values()) or any(truncated.values()):
             obs, infos = mediator.reset()
 
-    if is_main_process:
-        output_dir = hydra.core.hydra_config.HydraConfig.get().runtime.output_dir
-        metrics.report_final(os.path.join(output_dir, f"metrics_rank{rank}.parquet"))
-    
+    # Final flush of any remaining metrics
+    metrics.flush(metrics_path)
     mediator.close()
     log.info("Training complete.")
 

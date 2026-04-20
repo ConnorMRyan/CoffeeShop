@@ -32,9 +32,9 @@ class SACAgent:
         """Return actions per agent_id. This stub returns no-ops."""
         return {aid: {"action": 0, "val": 0.0, "logp": 0.0} for aid in obs.keys()}
 
-    def behavior_cloning_update(self, aid: str, obs_batch: torch.Tensor, act_batch: torch.Tensor, omega: Any) -> float:
-        """Stub for auxiliary distillation update."""
-        return 0.0
+    def behavior_cloning_update(self, aid: str, obs_batch: torch.Tensor, act_batch: torch.Tensor, omega: Any) -> torch.Tensor:
+        """Stub for auxiliary distillation update. Returns a zero-loss tensor so .backward() works."""
+        return torch.tensor(0.0, requires_grad=True)
 
     def get_action_dist(self, obs: Dict[str, Any]) -> Dict[str, Any]:
         """Get the action distribution for the given observation.

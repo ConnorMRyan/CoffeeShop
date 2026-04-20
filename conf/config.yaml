@@ -1,15 +1,36 @@
 defaults:
   - _self_
   - agent: ppo
-  - env: coffeeshop
+  - env: nethack
   - mediator: default
   - trainer: default
 
 run_id: default_run
 dist: false
 
+# ── GCS checkpoint sync ───────────────────────────────────────────────────────
+# Set bucket to enable cloud sync (required on preemptible GCP VMs).
+# Leave null for local-only training.
+#
+# Example override:
+#   python scripts/train.py gcs.bucket=my-training-bucket gcs.prefix=runs/nethack-ppo
+gcs:
+  bucket: null     # GCS bucket name, e.g. "my-coffeeshop-runs"
+  prefix: runs     # path prefix inside the bucket
+
 run:
-  steps: 1000
-  horizon: 200
-  meeting_interval: 400
+  steps: 1000000000
+  horizon: 2000
+
+  # Social sharing interval (steps between meetings).
+  # For a 1B-step run, start smaller so the shared buffer fills quickly,
+  # then relax to reduce synchronization overhead as the run matures.
+  meeting_interval: 1000          # initial (and fixed) interval
+  meeting_interval_end: 5000      # linear warmup target; set equal to meeting_interval to disable
+  meeting_interval_warmup: 200000 # steps over which to linearly scale the interval
+
+  checkpoint_interval: 50000      # save a checkpoint every N steps (rank-0 only)
+  resume_checkpoint: null         # filename inside checkpoints/<run_id>/ to resume from, or null
+  metrics_flush_interval: 10000   # flush metrics to disk every N steps
+
   seed: 42

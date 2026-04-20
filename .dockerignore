@@ -1,0 +1,41 @@
+# Python artefacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Version control
+.git/
+.github/
+.gitignore
+
+# Training outputs (potentially large; should live in GCS, not the image)
+checkpoints/
+outputs/
+runs/
+logs/
+wandb/
+
+# Stale pip-install artefacts created by the "=<version>" bug
+=*
+
+# Dev / test artefacts
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+*.pt
+
+# IDE
+.vscode/
+.idea/
+*.swp

@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import collections
 from dataclasses import dataclass
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, Tuple
 
 import numpy as np
 import torch
@@ -107,35 +106,45 @@ class RolloutBuffer:
 class PPOAgent:
     """PyTorch PPO agent."""
 
-    def __init__(self, obs_space: Any | None = None, act_space: Any | None = None, config: PPOConfig | None = None) -> None:
+    def __init__(self, obs_space: Any | None = None, act_space: Any | None = None, config: PPOConfig | None = None, obs_dim: int | None = None) -> None:
         self.obs_space = obs_space
         self.act_space = act_space
         self.config = config or PPOConfig()
-        
+
         # Require valid spaces — fail fast rather than silently building wrong-shaped networks
-        if self.obs_space is None or not hasattr(self.obs_space, "shape"):
+        if self.obs_space is None:
+            raise ValueError("PPOAgent requires obs_space. Pass env.obs_space.")
+
+        if obs_dim is not None:
+            # Explicit obs_dim takes priority (e.g. NLE wrapper with custom encoding)
+            pass
+        elif hasattr(self.obs_space, "shape") and self.obs_space.shape is not None:
+            obs_dim = int(np.prod(self.obs_space.shape))
+        elif hasattr(self.obs_space, "n"): # Discrete obs space
+            obs_dim = self.obs_space.n
+        elif hasattr(self.obs_space, "spaces"): # Dict obs space
             raise ValueError(
-                "PPOAgent requires obs_space with a .shape attribute. "
-                "Pass env.obs_space when constructing the agent."
+                "Dict obs_space detected but no obs_dim provided. "
+                "Pass obs_dim=env.obs_dim when using environments with custom observation encoding."
             )
+        else:
+            obs_dim = 96 # default overcooked
+
         if self.act_space is None or not hasattr(self.act_space, "n"):
             raise ValueError(
                 "PPOAgent requires act_space with a .n attribute (discrete action count). "
                 "Pass env.act_space when constructing the agent."
             )
-        obs_dim = int(np.prod(self.obs_space.shape))
         act_dim = self.act_space.n
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = ActorCritic(obs_dim, act_dim, self.config.hidden_size).to(self.device)
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.config.lr)
-        
-        # Buffer per agent_id for shared weight models
-        obs_shape = obs_space.shape if hasattr(obs_space, "shape") else (96,)
-        self.buffers: Dict[str, RolloutBuffer] = {
-            aid: RolloutBuffer(capacity=4096, obs_shape=obs_shape) 
-            for aid in ["agent_0", "agent_1"]
-        }
+
+        # Buffers allocated on demand in store_transition() to support any number of agents
+        obs_shape = obs_space.shape if hasattr(obs_space, "shape") and obs_space.shape is not None else (obs_dim,)
+        self._obs_shape = obs_shape
+        self.buffers: Dict[str, RolloutBuffer] = {}
 
     def act(self, obs: Dict[str, Any], deterministic: bool = False) -> Dict[str, Any]:
         """Return actions per agent_id."""
@@ -164,27 +173,21 @@ class PPOAgent:
 
     def store_transition(self, aid: str, obs: Any, act: int, reward: float, val: float, logp: float, terminal: bool):
         if aid not in self.buffers:
-            # Dynamically add buffer if new agent encountered (unlikely in this repo but good for robustness)
-            obs_shape = obs.shape if hasattr(obs, "shape") else (96,)
-            self.buffers[aid] = RolloutBuffer(capacity=4096, obs_shape=obs_shape)
+            self.buffers[aid] = RolloutBuffer(capacity=4096, obs_shape=self._obs_shape)
         self.buffers[aid].store(obs, act, reward, val, logp, terminal)
 
-    def behavior_cloning_update(self, aid: str, obs_batch: torch.Tensor, act_batch: torch.Tensor, omega: Any) -> float:
-        """Perform auxiliary distillation update."""
+    def behavior_cloning_update(self, aid: str, obs_batch: torch.Tensor, act_batch: torch.Tensor, omega: Any) -> torch.Tensor:
+        """Calculate auxiliary distillation loss."""
         # Assume tensors are already on the correct device and float/long
-        
+
         # Simple BC: maximize log_prob of given actions
-        # No optimizer.zero_grad() here because SocialActor might be calling this 
-        # and it might want to accumulate gradients if omega is learnable.
         dist, _ = self.model(obs_batch)
         logp = dist.log_prob(act_batch)
         
-        # Loss modulated by omega. If omega is a tensor, this maintains the graph.
+        # Loss modulated by omega.
         loss = -(logp.mean() * omega)
-        loss.backward()
-        # No optimizer.step() here, SocialActor or train.py handles it.
         
-        return loss.item()
+        return loss
 
     def update(self, last_vals: Dict[str, float] | None = None) -> Dict[str, float]:
         """Perform a training update from accumulated buffers.
@@ -247,7 +250,7 @@ class PPOAgent:
                 
                 loss = loss_pi + loss_v + loss_ent
                 
-                self.optimizer.zero_grad()
+                self.optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=0.5)
                 self.optimizer.step()

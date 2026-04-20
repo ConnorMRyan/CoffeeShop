@@ -46,7 +46,7 @@ class SocialActor:
             return omega_val if as_tensor else omega_val.item()
         return torch.tensor([self.omega], device=self.agent.device) if as_tensor else self.omega
 
-    def incorporate_shared_experience(self, obs_batch: torch.Tensor, act_batch: torch.Tensor) -> float:
+    def incorporate_shared_experience(self, obs_batch: torch.Tensor, act_batch: torch.Tensor) -> torch.Tensor:
         """Perform auxiliary distillation (Behavior Cloning) from shared experiences.
         
         Gated by the agent's current openness parameter `omega`.
@@ -55,15 +55,6 @@ class SocialActor:
         
         # Delegate BC computation to the underlying agent (PPOAgent)
         if hasattr(self.agent, "behavior_cloning_update"):
-            # Ensure base agent weights are updated too, but we need to zero grad first
-            self.agent.optimizer.zero_grad()
-            
             loss = self.agent.behavior_cloning_update(self.id, obs_batch, act_batch, current_omega)
-            
-            # Step base agent optimizer
-            self.agent.optimizer.step()
-            
-            # If omega is learnable, its gradient has been accumulated via behavior_cloning_update.
-            # Optimization step for omega is handled in train.py to allow coordination.
             return loss
-        return 0.0
+        return torch.tensor(0.0, device=obs_batch.device)
