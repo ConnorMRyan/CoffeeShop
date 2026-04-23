@@ -10,7 +10,7 @@ polars==0.20.18
 pyyaml==6.0.1
 rich==13.7.0
 loguru==0.7.0
-packaging==24.0
+packaging==26.1
 tqdm==4.67.3
 
 # -- Config Management --
