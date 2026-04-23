@@ -7,7 +7,7 @@
 numpy==1.26.4
 scipy==1.15.3
 polars==0.20.18
-pyyaml==6.0.1
+pyyaml==6.0.3
 rich==13.7.0
 loguru==0.7.0
 packaging==24.0
